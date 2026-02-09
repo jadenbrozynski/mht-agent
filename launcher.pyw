@@ -294,7 +294,7 @@ def _start_monitoring(control, outbound_worker=None):
     import pyautogui
     import threading
     import tkinter as tk
-    from pywinauto import Application
+    from pywinauto import Application, findwindows
     import re
 
     REFRESH_INTERVAL = 15  # 15 seconds
@@ -304,6 +304,47 @@ def _start_monitoring(control, outbound_worker=None):
     # Database for event tracking
     db = MHTDatabase(SCRIPT_DIR / "output" / "mht_data.db")
     patient_event_ids = {}  # {patient_name_upper: event_id}
+
+    # === ELEMENT DETECTION HELPERS (replace fixed sleeps) ===
+    def wait_for_window(title_re, timeout=5):
+        """Wait for a window to appear, return it immediately when found. No fixed sleep."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                elements = findwindows.find_elements(title_re=title_re, backend='uia')
+                if elements:
+                    app = Application(backend='uia').connect(handle=elements[0].handle, timeout=1)
+                    return app.window(handle=elements[0].handle)
+            except:
+                pass
+            time.sleep(0.05)  # 50ms polling interval
+        return None
+
+    def wait_for_window_close(title_re, timeout=3):
+        """Wait until a window disappears. No fixed sleep."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                elements = findwindows.find_elements(title_re=title_re, backend='uia')
+                if not elements:
+                    return True
+            except:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def wait_for_element(parent_win, timeout=3, **kwargs):
+        """Wait for a child element to appear in a window. Returns element or None."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                elem = parent_win.child_window(**kwargs)
+                if elem.exists():
+                    return elem
+            except:
+                pass
+            time.sleep(0.05)
+        return None
 
     # === BACKGROUND ERROR DETECTION THREAD ===
     # Runs continuously to catch Application Error popups without blocking main process
@@ -1639,8 +1680,8 @@ def _start_monitoring(control, outbound_worker=None):
     def click_qualified_patient(patient):
         """
         Extract patient demographics via Demographics popup + chart.
-        OPTIMIZED: Uses stored data_item ref to find chart icon instantly
-        instead of re-searching the entire tracking board.
+        EVENT-DRIVEN: Detects when windows/elements appear instead of fixed sleeps.
+        Uses stored data_item ref to find chart icon without re-searching.
         """
         name = patient.get('name', 'Unknown')
         name_rect = patient.get('name_rect')
@@ -1650,29 +1691,29 @@ def _start_monitoring(control, outbound_worker=None):
             control.add_log(f"No name_rect for {name}")
             return None
 
-        # Calculate center of name element
         cx = (name_rect.left + name_rect.right) // 2
         cy = (name_rect.top + name_rect.bottom) // 2
 
         control.add_log(f"Clicking {name} at ({cx}, {cy})")
         control.set_step(f"Extracting {name[:15]}...")
 
-        # Clear patient row overlays
         clear_patient_overlays()
 
-        # Click on patient name to open Demographics popup
+        # Click patient name and WAIT for Demographics window to appear (no fixed sleep)
         pyautogui.click(cx, cy)
-        time.sleep(0.4)
-        dismiss_popup_dialogs()
-
-        # Initialize patient data
         patient_data = {'name': name, 'clicked': True}
 
         try:
-            # Connect to Demographics window
-            from pywinauto import Application as DemoApp
-            demo_app = DemoApp(backend='uia').connect(title_re='.*Demographics.*', timeout=2)
-            demo_win = demo_app.window(title_re='.*Demographics.*')
+            # Wait for Demographics window - proceeds instantly when it appears
+            demo_win = wait_for_window('.*Demographics.*', timeout=5)
+            if not demo_win:
+                dismiss_popup_dialogs()
+                demo_win = wait_for_window('.*Demographics.*', timeout=3)
+
+            if not demo_win:
+                control.add_log(f"Demographics window didn't open for {name}")
+                pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+                return patient_data
 
             control.set_step("Extracting...")
 
@@ -1681,14 +1722,12 @@ def _start_monitoring(control, outbound_worker=None):
             texts = demo_win.descendants(control_type='Text')
             radios = demo_win.descendants(control_type='RadioButton')
 
-            # Extract ALL edit fields at once (no delays between)
             for edit in edits[:30]:
                 try:
                     txt = edit.window_text()
                     if not txt:
                         continue
                     rect = edit.rectangle()
-
                     if 330 < rect.top < 345 and rect.left < 600:
                         patient_data['first_name'] = txt
                     elif 368 < rect.top < 385 and rect.left < 600:
@@ -1702,7 +1741,6 @@ def _start_monitoring(control, outbound_worker=None):
                 except:
                     pass
 
-            # Extract MRN
             for txt_elem in texts[:30]:
                 try:
                     txt = txt_elem.window_text()
@@ -1712,7 +1750,6 @@ def _start_monitoring(control, outbound_worker=None):
                 except:
                     pass
 
-            # Extract Sex at Birth
             try:
                 for rb in radios:
                     txt = rb.window_text()
@@ -1730,7 +1767,6 @@ def _start_monitoring(control, outbound_worker=None):
             except:
                 pass
 
-            # Extract Race, Ethnicity, Language from popup Text elements
             skip_values = ['Race:', 'Race', 'Ethnicity:', 'Ethnicity', 'Language:', 'Language', 'Employer', 'Name:', 'Phone:', 'Ext:', 'Cultural Information']
             found_race = found_eth = found_lang = False
             for txt_elem in texts[:100]:
@@ -1759,14 +1795,14 @@ def _start_monitoring(control, outbound_worker=None):
             extracted = [f"{k}={v}" for k, v in patient_data.items() if k not in ['name', 'clicked']]
             control.add_log(f"Extracted: {', '.join(extracted)}")
 
-            # Close demographics popup (no verify - move on fast)
+            # Close demographics and WAIT for it to disappear (no fixed sleep)
             pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
-            time.sleep(0.3)
+            wait_for_window_close('.*Demographics.*', timeout=3)
 
         except Exception as e:
             control.add_log(f"Demographics error: {str(e)[:30]}")
             pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
-            time.sleep(0.3)
+            wait_for_window_close('.*Demographics.*', timeout=2)
 
         # === INSURANCE EXTRACTION - USE STORED DATA_ITEM (NO RE-SEARCH) ===
         control.set_step("Opening chart...")
@@ -1779,9 +1815,8 @@ def _start_monitoring(control, outbound_worker=None):
                     images_in_row = data_item.descendants(control_type='Image')
                     if images_in_row:
                         chart_icon = images_in_row[0]
-                        control.add_log("Chart icon found from stored ref")
                 except:
-                    control.add_log("Stored data_item stale, falling back to search")
+                    control.add_log("Stored data_item stale, falling back")
 
             # Fallback: quick search if stored ref failed
             if not chart_icon:
@@ -1807,31 +1842,35 @@ def _start_monitoring(control, outbound_worker=None):
                 chart_cx = (chart_rect.left + chart_rect.right) // 2
                 chart_cy = (chart_rect.top + chart_rect.bottom) // 2
 
+                # Click chart icon and WAIT for chart window to appear (no fixed sleep)
                 pyautogui.click(chart_cx, chart_cy)
                 control.set_step("Loading chart...")
-                time.sleep(0.8)
-                dismiss_popup_dialogs()
 
-                # Verify chart opened (2 attempts, reduced timeout)
-                chart_app = None
-                for attempt in range(2):
-                    try:
-                        chart_app = Application(backend='uia').connect(title_re=f'.*{name.split(",")[0]}.*', timeout=2)
-                        break
-                    except:
-                        if attempt == 0:
-                            time.sleep(0.3)
-                            dismiss_popup_dialogs()
+                name_part = name.split(",")[0].strip()
+                chart_title_re = f'.*{re.escape(name_part)}.*'
+                chart_win = wait_for_window(chart_title_re, timeout=8)
 
-                if not chart_app:
+                if not chart_win:
+                    dismiss_popup_dialogs()
+                    chart_win = wait_for_window(chart_title_re, timeout=4)
+
+                if not chart_win:
                     control.add_log("Chart didn't open - skipping insurance")
                     raise Exception("Chart failed to open")
 
-                chart_win = chart_app.window(title_re=f'.*{name.split(",")[0]}.*')
-
-                # Click Demographics tab
+                # Click Demographics tab and wait for content to load
                 pyautogui.click(2462, 472)
-                time.sleep(0.5)
+                # Wait for tab content by checking for text elements to appear
+                deadline = time.time() + 3
+                texts = []
+                while time.time() < deadline:
+                    try:
+                        texts = chart_win.descendants(control_type='Text')
+                        if len(texts) > 10:  # Demographics tab has many text elements
+                            break
+                    except:
+                        pass
+                    time.sleep(0.05)
 
                 # Extract insurance from window title
                 try:
@@ -1846,11 +1885,12 @@ def _start_monitoring(control, outbound_worker=None):
                 except:
                     pass
 
-                # Extract from chart text elements (insurance + race/eth/lang if not found in popup)
+                # Extract from chart text elements
                 try:
-                    texts = chart_win.descendants(control_type='Text')
+                    if not texts:
+                        texts = chart_win.descendants(control_type='Text')
 
-                    # Primary Insurance from chart
+                    # Primary Insurance
                     if 'insurance' not in patient_data or patient_data.get('insurance') in ['SELF PAY', 'None']:
                         found_primary_label = False
                         for t in texts[:100]:
@@ -1898,11 +1938,11 @@ def _start_monitoring(control, outbound_worker=None):
                 except Exception as ins_err:
                     control.add_log(f"Insurance extraction error: {str(ins_err)[:30]}")
 
-                # Close sidebar then chart (fast, no verify)
+                # Close sidebar then chart, WAIT for chart to disappear
                 pyautogui.click(2432, 185)
-                time.sleep(0.2)
+                time.sleep(0.1)  # tiny gap between clicks
                 pyautogui.click(1782, 1203)
-                time.sleep(0.3)
+                wait_for_window_close(chart_title_re, timeout=3)
                 control.add_log("Chart closed")
 
             else:
@@ -1912,9 +1952,8 @@ def _start_monitoring(control, outbound_worker=None):
             control.add_log(f"Chart error: {str(chart_err)[:30]}")
             try:
                 pyautogui.click(2432, 185)
-                time.sleep(0.15)
+                time.sleep(0.1)
                 pyautogui.click(1782, 1203)
-                time.sleep(0.15)
             except:
                 pass
 
@@ -1994,7 +2033,6 @@ def _start_monitoring(control, outbound_worker=None):
 
         # Clear overlays before clicking
         clear_patient_overlays()
-        time.sleep(0.2)
 
         patient_data = {'name': name, 'from_roomed': True}
         chart_icon = None  # Not used with new rect-based approach
@@ -2046,41 +2084,26 @@ def _start_monitoring(control, outbound_worker=None):
 
             control.add_log(f"Clicking roomed patient {name} at ({cx}, {cy})")
             pyautogui.click(cx, cy)
-            time.sleep(0.15)
+            time.sleep(0.1)
             pyautogui.click(cx, cy)  # Double click to ensure it registers
 
-            # Wait for Demographics to load
+            # Wait for Demographics/patient window to appear (no fixed sleep)
             control.set_step("Loading demographics...")
-            time.sleep(0.8)
-            dismiss_popup_dialogs()
+            name_part = name.split(',')[0].upper()
+            demo_win_roomed = wait_for_window(f'.*{re.escape(name_part)}.*', timeout=5)
+            if not demo_win_roomed:
+                dismiss_popup_dialogs()
+                demo_win_roomed = wait_for_window(f'.*{re.escape(name_part)}.*', timeout=3)
 
-            # Extract data from Demographics window - use Desktop to find window
+            # Extract data from Demographics window
             try:
-                from pywinauto import Desktop
-                control.add_log("Finding Demographics window...")
-
-                # Use Desktop to find window by patient name (same as working test)
-                desktop = Desktop(backend='uia')
-                demo_win = None
-                name_part = name.split(',')[0].upper()  # e.g., "STEPHENS"
-
-                for w in desktop.windows():
-                    try:
-                        title = w.window_text()
-                        if title and name_part in title.upper():
-                            demo_win = w
-                            control.add_log(f"Found window: {title[:50]}")
-                            break
-                    except:
-                        continue
-
+                demo_win = demo_win_roomed
                 if not demo_win:
                     control.add_log("ERROR: Could not find Demographics window!")
                     pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
-                    time.sleep(0.5)
                     return None
 
-                control.add_log(f"SUCCESS: Connected to Demographics for roomed patient")
+                control.add_log(f"Connected to Demographics for roomed patient")
 
                 # Get all Edit fields
                 edits = demo_win.descendants(control_type='Edit')
@@ -2152,52 +2175,61 @@ def _start_monitoring(control, outbound_worker=None):
                 # NOTE: Race, Ethnicity, Language, and Insurance are ALL extracted from the Chart
                 # (Demographics tab), not from this Demographics popup. We just get basic info here.
 
-                # Close Demographics quickly
+                # Close Demographics and wait for it to disappear
                 pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+                wait_for_window_close(f'.*{re.escape(name_part)}.*', timeout=2)
                 control.add_log("Closed demographics")
-                time.sleep(0.3)
 
             except Exception as demo_err:
                 control.add_log(f"Demographics error: {str(demo_err)[:30]}")
                 pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
-                time.sleep(0.3)
+                wait_for_window_close(f'.*{re.escape(name_part)}.*', timeout=2)
 
-            # Click chart icon - use SAME row position as the patient name click
+            # Click chart icon and WAIT for chart window (no fixed sleep)
             control.set_step("Opening chart...")
             try:
                 chart_cx = 978
                 chart_cy = cy
                 pyautogui.click(chart_cx, chart_cy)
                 control.add_log(f"Clicked chart icon at ({chart_cx}, {chart_cy})")
-                time.sleep(0.8)
-                dismiss_popup_dialogs()
 
-                # Extract data from chart
-                chart_app = Application(backend='uia').connect(title_re=f'.*{name.split(",")[0]}.*', timeout=3)
-                chart_win = chart_app.window(title_re=f'.*{name.split(",")[0]}.*')
+                chart_title_re = f'.*{re.escape(name.split(",")[0])}.*'
+                chart_win = wait_for_window(chart_title_re, timeout=8)
+                if not chart_win:
+                    dismiss_popup_dialogs()
+                    chart_win = wait_for_window(chart_title_re, timeout=4)
 
-                # Click Demographics tab
+                if not chart_win:
+                    control.add_log("Chart didn't open")
+                    raise Exception("Chart failed to open")
+
+                # Click Demographics tab and wait for content
                 pyautogui.click(2462, 472)
-                time.sleep(0.5)
-
-                # Get ALL text elements with positions (for race/eth/lang AND insurance)
+                deadline = time.time() + 3
                 texts_with_pos = []
-                for t in chart_win.descendants(control_type='Text'):
+                while time.time() < deadline:
                     try:
-                        txt = t.element_info.name or ''
-                        rect = t.rectangle()
-                        if txt:
-                            texts_with_pos.append({'txt': txt, 'x': rect.left, 'y': rect.top})
+                        all_texts = chart_win.descendants(control_type='Text')
+                        if len(all_texts) > 10:
+                            for t in all_texts:
+                                try:
+                                    txt = t.element_info.name or ''
+                                    rect = t.rectangle()
+                                    if txt:
+                                        texts_with_pos.append({'txt': txt, 'x': rect.left, 'y': rect.top})
+                                except:
+                                    pass
+                            break
                     except:
                         pass
+                    time.sleep(0.05)
 
                 control.add_log(f"Chart has {len(texts_with_pos)} text elements")
 
-                # Extract Race (from Chart Demographics tab)
+                # Extract Race
                 for t in texts_with_pos:
                     if t['txt'] == 'Race:':
-                        ry = t['y']
-                        rx = t['x']
+                        ry, rx = t['y'], t['x']
                         for v in texts_with_pos:
                             if abs(v['y'] - ry) < 20 and v['x'] > rx + 50:
                                 patient_data['race'] = v['txt']
@@ -2205,11 +2237,10 @@ def _start_monitoring(control, outbound_worker=None):
                                 break
                         break
 
-                # Extract Ethnicity (from Chart Demographics tab)
+                # Extract Ethnicity
                 for t in texts_with_pos:
                     if t['txt'] == 'Ethnicity:':
-                        ey = t['y']
-                        ex = t['x']
+                        ey, ex = t['y'], t['x']
                         for v in texts_with_pos:
                             if abs(v['y'] - ey) < 20 and v['x'] > ex + 50:
                                 patient_data['ethnicity'] = v['txt']
@@ -2217,11 +2248,10 @@ def _start_monitoring(control, outbound_worker=None):
                                 break
                         break
 
-                # Extract Language (from Chart Demographics tab)
+                # Extract Language
                 for t in texts_with_pos:
                     if t['txt'] == 'Language:':
-                        ly = t['y']
-                        lx = t['x']
+                        ly, lx = t['y'], t['x']
                         for v in texts_with_pos:
                             if abs(v['y'] - ly) < 20 and v['x'] > lx + 50:
                                 patient_data['language'] = v['txt']
@@ -2232,8 +2262,7 @@ def _start_monitoring(control, outbound_worker=None):
                 # Extract Primary Insurance
                 for t in texts_with_pos:
                     if t['txt'] == 'Primary Insurance:':
-                        iy = t['y']
-                        ix = t['x']
+                        iy, ix = t['y'], t['x']
                         for v in texts_with_pos:
                             if abs(v['y'] - iy) < 20 and v['x'] > ix + 50:
                                 patient_data['insurance'] = v['txt']
@@ -2241,13 +2270,12 @@ def _start_monitoring(control, outbound_worker=None):
                                 break
                         break
 
-                # Close chart - click X button at top right
+                # Close chart and WAIT for it to disappear
                 pyautogui.click(2406, 184)
-                time.sleep(0.3)
-                # Click "Close Chart" confirmation button
+                time.sleep(0.1)
                 pyautogui.click(1792, 1204)
+                wait_for_window_close(chart_title_re, timeout=3)
                 control.add_log("Closed chart")
-                time.sleep(0.3)
 
             except Exception as chart_err:
                 control.add_log(f"Chart error: {str(chart_err)[:30]}")
@@ -2366,8 +2394,7 @@ def _start_monitoring(control, outbound_worker=None):
                 if data:
                     control.add_log(f"Successfully extracted data for {name}")
 
-                # Quick re-scan
-                time.sleep(0.2)
+                # Quick re-scan (no sleep, just clear and rescan)
                 clear_patient_overlays()
                 patients = find_patient_rows()
                 if patients:
@@ -2449,15 +2476,13 @@ def _start_monitoring(control, outbound_worker=None):
             if control.is_killed:
                 break
 
-            # Click Refresh with verification
+            # Click Refresh - dismiss any error popups if they appear
             control.set_step("Refreshing...")
             pyautogui.click(REFRESH_X, REFRESH_Y)
-            time.sleep(0.5)
 
-            # Verify refresh worked - check for error popups
+            # Quick check for error popup (no fixed sleep - just poll once)
             refresh_ok = True
-            for check in range(3):
-                # Check if error popup appeared
+            for check in range(2):
                 try:
                     from pywinauto import Desktop
                     desktop = Desktop(backend='uia')
@@ -2469,18 +2494,16 @@ def _start_monitoring(control, outbound_worker=None):
                             for btn in buttons:
                                 if btn.window_text() in ['OK', 'Ok']:
                                     btn.click_input()
-                                    time.sleep(0.3)
+                                    time.sleep(0.15)
                                     break
-                            # Retry refresh
                             pyautogui.click(REFRESH_X, REFRESH_Y)
-                            time.sleep(1.0)
                             refresh_ok = False
                             break
                 except:
                     pass
                 if refresh_ok:
                     break
-                time.sleep(0.5)
+                time.sleep(0.1)
 
             control.add_log("Refresh complete")
 
