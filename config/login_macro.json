@@ -1,0 +1,85 @@
+{
+  "recorded_at": "2026-01-12 21:50:59",
+  "actions": [
+    {
+      "action_type": "click",
+      "x": 1057,
+      "y": 868,
+      "text": null,
+      "key": null,
+      "delay": 2.86
+    },
+    {
+      "action_type": "type",
+      "x": null,
+      "y": null,
+      "text": "\u0016",
+      "key": null,
+      "delay": 0.01
+    },
+    {
+      "action_type": "click",
+      "x": 1399,
+      "y": 915,
+      "text": null,
+      "key": null,
+      "delay": 0.0
+    },
+    {
+      "action_type": "click",
+      "x": 1240,
+      "y": 951,
+      "text": null,
+      "key": null,
+      "delay": 3.6
+    },
+    {
+      "action_type": "type",
+      "x": null,
+      "y": null,
+      "text": "MENTAL@0",
+      "key": null,
+      "delay": 0.0
+    },
+    {
+      "action_type": "key",
+      "x": null,
+      "y": null,
+      "text": null,
+      "key": "backspace",
+      "delay": 0.0
+    },
+    {
+      "action_type": "type",
+      "x": null,
+      "y": null,
+      "text": "2026",
+      "key": null,
+      "delay": 0.26
+    },
+    {
+      "action_type": "type",
+      "x": null,
+      "y": null,
+      "text": "!!",
+      "key": null,
+      "delay": 0.51
+    },
+    {
+      "action_type": "click",
+      "x": 1269,
+      "y": 1087,
+      "text": null,
+      "key": null,
+      "delay": 0.0
+    },
+    {
+      "action_type": "click",
+      "x": 2357,
+      "y": 1454,
+      "text": null,
+      "key": null,
+      "delay": 3.59
+    }
+  ]
+}

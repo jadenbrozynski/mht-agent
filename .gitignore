@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+output/
+logs/
+*.log
+*.png
+*.jpg
+debug_output.txt
+
+# Config with secrets
+.env
+config/.env
+
+# Temp files
+*.tmp
+*.bak
+*.backup
+tmpclaude-*
+
+# Claude
+.claude/
+
+# Windows null device file
+nul

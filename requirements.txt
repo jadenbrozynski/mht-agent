@@ -1,0 +1,12 @@
+# MHT Agentic Dependencies
+
+# Desktop automation
+pyautogui>=0.9.54
+pygetwindow>=0.0.9
+pywinauto>=0.6.8
+
+# Image processing
+pillow>=10.0.0
+
+# Macro recording
+pynput>=1.7.6
