@@ -20,6 +20,21 @@ import os
 logger = logging.getLogger("mhtagentic.control_overlay")
 
 
+def _compute_scale(root):
+    """Compute UI scale factor relative to 1920x1080 baseline."""
+    try:
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        return min(sw / 1920, sh / 1080)
+    except:
+        return 1.0
+
+
+def _sf(base_size, scale):
+    """Scale a font size, minimum 7."""
+    return max(7, round(base_size * scale))
+
+
 class ModeSelectionOverlay:
     """
     Initial mode selection overlay.
@@ -60,13 +75,14 @@ class ModeSelectionOverlay:
 
     def _create_panel(self):
         """Create the mode selection panel."""
+        s = _compute_scale(self.root)
         self.panel = tk.Toplevel(self.root)
         self.panel.title("MHT Agentic")
         self.panel.attributes("-topmost", True)
         self.panel.overrideredirect(True)
 
-        panel_width = 280
-        panel_height = 320  # Increased for 3 buttons
+        panel_width = int(260 * s)
+        panel_height = int(300 * s)
 
         # Center on screen
         screen_width = self.root.winfo_screenwidth()
@@ -87,38 +103,38 @@ class ModeSelectionOverlay:
         main_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # Title
-        title_frame = tk.Frame(main_frame, bg=accent_color, height=30)
+        title_frame = tk.Frame(main_frame, bg=accent_color, height=int(28 * s))
         title_frame.pack(fill=tk.X)
         title_frame.pack_propagate(False)
 
         title_label = tk.Label(
             title_frame,
             text="MHT Agentic",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", _sf(10, s), "bold"),
             bg=accent_color,
             fg="#1a1a2e"
         )
-        title_label.pack(pady=5)
+        title_label.pack(pady=int(4 * s))
 
         # Subtitle
         subtitle = tk.Label(
             main_frame,
             text="Select Mode",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, s)),
             bg=bg_color,
             fg="#888888"
         )
-        subtitle.pack(pady=(15, 10))
+        subtitle.pack(pady=(int(12 * s), int(8 * s)))
 
         # Button frame
         btn_frame = tk.Frame(main_frame, bg=bg_color)
-        btn_frame.pack(fill=tk.X, padx=20, pady=5)
+        btn_frame.pack(fill=tk.X, padx=int(18 * s), pady=int(4 * s))
 
         # Saved mode button (recommended)
         saved_btn = tk.Button(
             btn_frame,
             text="Saved (Fast)",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", _sf(10, s), "bold"),
             bg="#28a745",
             fg="white",
             activebackground="#218838",
@@ -127,12 +143,12 @@ class ModeSelectionOverlay:
             cursor="hand2",
             command=lambda: self._select_mode("saved")
         )
-        saved_btn.pack(fill=tk.X, pady=5, ipady=8)
+        saved_btn.pack(fill=tk.X, pady=int(4 * s), ipady=int(6 * s))
 
         saved_desc = tk.Label(
             btn_frame,
             text="Replay recorded login",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", _sf(8, s)),
             bg=bg_color,
             fg="#666666"
         )
@@ -142,7 +158,7 @@ class ModeSelectionOverlay:
         record_btn = tk.Button(
             btn_frame,
             text="Record",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", _sf(10, s)),
             bg="#ff9800",
             fg="white",
             activebackground="#f57c00",
@@ -151,12 +167,12 @@ class ModeSelectionOverlay:
             cursor="hand2",
             command=lambda: self._select_mode("record")
         )
-        record_btn.pack(fill=tk.X, pady=(12, 5), ipady=8)
+        record_btn.pack(fill=tk.X, pady=(int(10 * s), int(4 * s)), ipady=int(6 * s))
 
         record_desc = tk.Label(
             btn_frame,
             text="Record your login actions",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", _sf(8, s)),
             bg=bg_color,
             fg="#666666"
         )
@@ -166,7 +182,7 @@ class ModeSelectionOverlay:
         agentic_btn = tk.Button(
             btn_frame,
             text="Agentic (AI)",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", _sf(10, s)),
             bg="#0097d6",
             fg="white",
             activebackground="#0077a8",
@@ -175,12 +191,12 @@ class ModeSelectionOverlay:
             cursor="hand2",
             command=lambda: self._select_mode("agentic")
         )
-        agentic_btn.pack(fill=tk.X, pady=(12, 5), ipady=8)
+        agentic_btn.pack(fill=tk.X, pady=(int(10 * s), int(4 * s)), ipady=int(6 * s))
 
         agentic_desc = tk.Label(
             btn_frame,
             text="AI learns new EMR (slower)",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", _sf(8, s)),
             bg=bg_color,
             fg="#666666"
         )
@@ -325,6 +341,8 @@ class ControlOverlay:
 
     def _create_panel(self):
         """Create the control panel window."""
+        s = _compute_scale(self.root)
+        self._scale = s  # Store for prompt_input resizing
         self.panel = tk.Toplevel(self.root)
         self.panel.title("MHT Agentic")
         self.panel.attributes("-topmost", True)
@@ -333,26 +351,28 @@ class ControlOverlay:
         # Register for global hide/show
         register_overlay_window(self.panel)
 
-        # Style configuration - spacious and elegant
-        panel_width = 300
-        panel_height = 280
+        # Dynamic sizing based on screen resolution
+        panel_width = int(260 * s)
+        panel_height = int(240 * s)
+        self._panel_width = panel_width
+        self._panel_height = panel_height
 
         # Position in bottom-right corner
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x_pos = screen_width - panel_width - 40
-        y_pos = screen_height - panel_height - 200  # Higher to avoid blocking Close button
+        x_pos = screen_width - panel_width - int(40 * s)
+        y_pos = screen_height - panel_height - int(180 * s)
 
         self.panel.geometry(f"{panel_width}x{panel_height}+{x_pos}+{y_pos}")
 
         # Elegant dark theme - softer colors
-        bg_color = "#1a1a24"  # Soft dark background
-        card_color = "#252532"  # Slightly lighter for cards
-        accent_color = "#8b9dc3"  # Soft blue-gray accent
-        text_primary = "#f0f0f0"  # Soft white
-        text_secondary = "#9a9a9a"  # Muted gray
-        success_color = "#5cb85c"  # Soft green
-        danger_color = "#d9534f"  # Soft red
+        bg_color = "#1a1a24"
+        card_color = "#252532"
+        accent_color = "#8b9dc3"
+        text_primary = "#f0f0f0"
+        text_secondary = "#9a9a9a"
+        success_color = "#5cb85c"
+        danger_color = "#d9534f"
 
         self.panel.configure(bg=bg_color)
 
@@ -367,22 +387,22 @@ class ControlOverlay:
         title_label = tk.Label(
             title_frame,
             text="MHT Agentic",
-            font=("Segoe UI", 14, "bold"),
+            font=("Segoe UI", _sf(11, s), "bold"),
             bg=card_color,
             fg=text_primary
         )
-        title_label.pack(side=tk.LEFT, padx=20, pady=12)
+        title_label.pack(side=tk.LEFT, padx=int(15 * s), pady=int(8 * s))
 
         # X button to close/kill (top right)
         close_btn = tk.Label(
             title_frame,
             text="X",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", _sf(10, s), "bold"),
             bg=card_color,
             fg="#888888",
             cursor="hand2"
         )
-        close_btn.pack(side=tk.RIGHT, padx=15, pady=8)
+        close_btn.pack(side=tk.RIGHT, padx=int(12 * s), pady=int(6 * s))
         close_btn.bind("<Enter>", lambda e: close_btn.configure(fg=danger_color))
         close_btn.bind("<Leave>", lambda e: close_btn.configure(fg="#888888"))
         close_btn.bind("<Button-1>", lambda e: self._on_kill_click())
@@ -398,13 +418,14 @@ class ControlOverlay:
         title_label.bind("<B1-Motion>", self._drag)
 
         # Status area
+        pad_x = int(15 * s)
         status_frame = tk.Frame(main_frame, bg=bg_color)
-        status_frame.pack(fill=tk.X, padx=20, pady=(20, 15))
+        status_frame.pack(fill=tk.X, padx=pad_x, pady=(int(12 * s), int(10 * s)))
 
         self.status_label = tk.Label(
             status_frame,
             text=self._status_text,
-            font=("Segoe UI", 13),
+            font=("Segoe UI", _sf(11, s)),
             bg=bg_color,
             fg=accent_color,
             anchor="w"
@@ -414,24 +435,24 @@ class ControlOverlay:
         self.step_label = tk.Label(
             status_frame,
             text=self._step_text,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, s)),
             bg=bg_color,
             fg=text_secondary,
             anchor="w",
-            wraplength=260,
+            wraplength=panel_width - int(40 * s),
             justify="left"
         )
-        self.step_label.pack(fill=tk.X, pady=(8, 0))
+        self.step_label.pack(fill=tk.X, pady=(int(6 * s), 0))
 
         # Button frame
         button_frame = tk.Frame(main_frame, bg=bg_color)
-        button_frame.pack(fill=tk.X, padx=20, pady=(15, 20))
+        button_frame.pack(fill=tk.X, padx=pad_x, pady=(int(10 * s), int(15 * s)))
 
         # Continue button
         self.proceed_btn = tk.Button(
             button_frame,
             text="Continue",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", _sf(10, s)),
             bg=success_color,
             fg="white",
             activebackground="#4a9d4a",
@@ -440,13 +461,13 @@ class ControlOverlay:
             cursor="hand2",
             command=self._on_proceed_click
         )
-        self.proceed_btn.pack(fill=tk.X, pady=(0, 10), ipady=8)
+        self.proceed_btn.pack(fill=tk.X, pady=(0, int(8 * s)), ipady=int(6 * s))
 
         # Stop button
         self.kill_btn = tk.Button(
             button_frame,
             text="Stop",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, s)),
             bg=card_color,
             fg=danger_color,
             activebackground="#333344",
@@ -455,7 +476,7 @@ class ControlOverlay:
             cursor="hand2",
             command=self._on_kill_click
         )
-        self.kill_btn.pack(fill=tk.X, ipady=6)
+        self.kill_btn.pack(fill=tk.X, ipady=int(4 * s))
 
         # Hidden debug/record buttons (keep for functionality but don't show)
         self.debug_btn = tk.Button(button_frame, command=self._on_debug_click)
@@ -484,28 +505,28 @@ class ControlOverlay:
         self._input_label = tk.Label(
             self._input_frame,
             text="Enter OTP Code",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, s)),
             bg=card_color,
             fg=text_primary
         )
-        self._input_label.pack(fill=tk.X, padx=15, pady=(12, 5))
+        self._input_label.pack(fill=tk.X, padx=int(12 * s), pady=(int(10 * s), int(4 * s)))
 
         self._input_entry = tk.Entry(
             self._input_frame,
-            font=("Segoe UI", 14),
+            font=("Segoe UI", _sf(12, s)),
             bg="#3a3a4e",
             fg=text_primary,
             insertbackground=text_primary,
             relief=tk.FLAT,
             justify="center"
         )
-        self._input_entry.pack(fill=tk.X, padx=15, pady=5, ipady=8)
+        self._input_entry.pack(fill=tk.X, padx=int(12 * s), pady=int(4 * s), ipady=int(6 * s))
         self._input_entry.bind("<Return>", lambda e: self._on_input_submit())
 
         self._input_submit_btn = tk.Button(
             self._input_frame,
             text="Submit",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, s)),
             bg=success_color,
             fg="white",
             activebackground="#4a9d4a",
@@ -514,7 +535,7 @@ class ControlOverlay:
             cursor="hand2",
             command=self._on_input_submit
         )
-        self._input_submit_btn.pack(fill=tk.X, padx=15, pady=(5, 12), ipady=6)
+        self._input_submit_btn.pack(fill=tk.X, padx=int(12 * s), pady=(int(4 * s), int(10 * s)), ipady=int(4 * s))
         self._add_hover_effect(self._input_submit_btn, success_color, "#4a9d4a")
 
     def _add_hover_effect(self, button, normal_color, hover_color):
@@ -743,11 +764,13 @@ class ControlOverlay:
                     self._input_frame.pack(fill=tk.X, padx=20, pady=(0, 15), before=self._button_frame)
                 # Resize panel to fit input - keep same position by adjusting y
                 if self.panel:
+                    s = getattr(self, '_scale', 1.0)
                     screen_height = self.root.winfo_screenheight()
-                    new_height = 420
+                    new_height = int(360 * s)
+                    pw = getattr(self, '_panel_width', int(260 * s))
                     x_pos = self.panel.winfo_x()
-                    y_pos = screen_height - new_height - 200
-                    self.panel.geometry(f"300x{new_height}+{x_pos}+{y_pos}")
+                    y_pos = screen_height - new_height - int(180 * s)
+                    self.panel.geometry(f"{pw}x{new_height}+{x_pos}+{y_pos}")
                     self.panel.update()
                 # Focus the entry after a short delay
                 if self._input_entry and self.root:
@@ -768,11 +791,13 @@ class ControlOverlay:
                 if self._input_frame:
                     self._input_frame.pack_forget()
                 if self.panel and self.root:
+                    s = getattr(self, '_scale', 1.0)
                     screen_height = self.root.winfo_screenheight()
-                    new_height = 280
+                    ph = getattr(self, '_panel_height', int(240 * s))
+                    pw = getattr(self, '_panel_width', int(260 * s))
                     x_pos = self.panel.winfo_x()
-                    y_pos = screen_height - new_height - 200
-                    self.panel.geometry(f"300x{new_height}+{x_pos}+{y_pos}")
+                    y_pos = screen_height - ph - int(180 * s)
+                    self.panel.geometry(f"{pw}x{ph}+{x_pos}+{y_pos}")
                     # CRITICAL: Ensure panel remains visible after hiding input
                     self.panel.update_idletasks()
                     self.panel.lift()
@@ -869,18 +894,20 @@ class AnalyticsDashboardOverlay:
 
     def _create_panel(self):
         """Create the analytics dashboard panel."""
+        s = _compute_scale(self.root)
+        self._scale = s
         self.panel = tk.Toplevel(self.root)
         self.panel.title("MHT Analytics")
         self.panel.attributes("-topmost", True)
         self.panel.overrideredirect(True)
 
-        panel_width = 380
-        panel_height = 520
+        panel_width = int(300 * s)
+        panel_height = int(400 * s)
 
         # Position in top-right, offset from other overlays
         screen_width = self.root.winfo_screenwidth()
-        x_pos = screen_width - panel_width - 460  # Left of roomed patients
-        y_pos = 40
+        x_pos = screen_width - panel_width - int(360 * s)
+        y_pos = int(30 * s)
 
         self.panel.geometry(f"{panel_width}x{panel_height}+{x_pos}+{y_pos}")
 
@@ -906,21 +933,21 @@ class AnalyticsDashboardOverlay:
         title_label = tk.Label(
             title_frame,
             text="Analytics Dashboard",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", _sf(10, s), "bold"),
             bg=card_color,
             fg=text_primary
         )
-        title_label.pack(side=tk.LEFT, padx=15, pady=10)
+        title_label.pack(side=tk.LEFT, padx=int(10 * s), pady=int(7 * s))
 
         # Live indicator
         self._labels['live'] = tk.Label(
             title_frame,
             text="● LIVE",
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", _sf(8, s), "bold"),
             bg=card_color,
             fg=success_color
         )
-        self._labels['live'].pack(side=tk.RIGHT, padx=15, pady=10)
+        self._labels['live'].pack(side=tk.RIGHT, padx=int(10 * s), pady=int(7 * s))
 
         # Accent bar
         tk.Frame(main_frame, bg=accent_color, height=2).pack(fill=tk.X)
@@ -932,63 +959,64 @@ class AnalyticsDashboardOverlay:
         title_label.bind("<B1-Motion>", self._drag)
 
         # Content frame with padding
+        pad = int(10 * s)
         content_frame = tk.Frame(main_frame, bg=bg_color)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=pad, pady=int(6 * s))
 
         # === SESSION STATS SECTION ===
-        self._create_section(content_frame, "Current Session", bg_color, text_primary)
+        self._create_section(content_frame, "Current Session", bg_color, text_primary, s)
 
         stats_grid = tk.Frame(content_frame, bg=bg_color)
-        stats_grid.pack(fill=tk.X, pady=(5, 15))
+        stats_grid.pack(fill=tk.X, pady=(int(3 * s), int(8 * s)))
 
         # Row 1: Patients processed & Success rate
         row1 = tk.Frame(stats_grid, bg=bg_color)
         row1.pack(fill=tk.X)
 
-        self._create_stat_box(row1, "patients_processed", "Patients", "0", success_color, bg_color, card_color, text_primary)
-        self._create_stat_box(row1, "success_rate", "Success", "0%", accent_color, bg_color, card_color, text_primary)
+        self._create_stat_box(row1, "patients_processed", "Patients", "0", success_color, bg_color, card_color, text_primary, s)
+        self._create_stat_box(row1, "success_rate", "Success", "0%", accent_color, bg_color, card_color, text_primary, s)
 
         # Row 2: Avg time & Patients/hour
         row2 = tk.Frame(stats_grid, bg=bg_color)
-        row2.pack(fill=tk.X, pady=(5, 0))
+        row2.pack(fill=tk.X, pady=(int(3 * s), 0))
 
-        self._create_stat_box(row2, "avg_time", "Avg Time", "0s", warning_color, bg_color, card_color, text_primary)
-        self._create_stat_box(row2, "patients_per_hour", "Per Hour", "0", "#9c27b0", bg_color, card_color, text_primary)
+        self._create_stat_box(row2, "avg_time", "Avg Time", "0s", warning_color, bg_color, card_color, text_primary, s)
+        self._create_stat_box(row2, "patients_per_hour", "Per Hour", "0", "#9c27b0", bg_color, card_color, text_primary, s)
 
         # === DETAILED METRICS ===
-        self._create_section(content_frame, "Processing Breakdown", bg_color, text_primary)
+        self._create_section(content_frame, "Processing Breakdown", bg_color, text_primary, s)
 
         details_frame = tk.Frame(content_frame, bg=card_color)
-        details_frame.pack(fill=tk.X, pady=(5, 15))
+        details_frame.pack(fill=tk.X, pady=(int(3 * s), int(8 * s)))
 
-        self._create_detail_row(details_frame, "successful", "Successful:", "0", success_color, card_color, text_primary, text_secondary)
-        self._create_detail_row(details_frame, "partial", "Partial:", "0", warning_color, card_color, text_primary, text_secondary)
-        self._create_detail_row(details_frame, "failed", "Failed:", "0", "#d9534f", card_color, text_primary, text_secondary)
-        self._create_detail_row(details_frame, "skipped", "Skipped:", "0", text_secondary, card_color, text_primary, text_secondary)
-        self._create_detail_row(details_frame, "scans", "WR Scans:", "0", accent_color, card_color, text_primary, text_secondary)
-        self._create_detail_row(details_frame, "popups", "Popups:", "0", "#ff9800", card_color, text_primary, text_secondary)
+        self._create_detail_row(details_frame, "successful", "Successful:", "0", success_color, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(details_frame, "partial", "Partial:", "0", warning_color, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(details_frame, "failed", "Failed:", "0", "#d9534f", card_color, text_primary, text_secondary, s)
+        self._create_detail_row(details_frame, "skipped", "Skipped:", "0", text_secondary, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(details_frame, "scans", "WR Scans:", "0", accent_color, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(details_frame, "popups", "Popups:", "0", "#ff9800", card_color, text_primary, text_secondary, s)
 
         # === VALUE METRICS ===
-        self._create_section(content_frame, "Value Assessment", bg_color, text_primary)
+        self._create_section(content_frame, "Value Assessment", bg_color, text_primary, s)
 
         value_frame = tk.Frame(content_frame, bg=card_color)
-        value_frame.pack(fill=tk.X, pady=(5, 10))
+        value_frame.pack(fill=tk.X, pady=(int(3 * s), int(6 * s)))
 
-        self._create_detail_row(value_frame, "efficiency", "Efficiency:", "0x faster", success_color, card_color, text_primary, text_secondary)
-        self._create_detail_row(value_frame, "time_saved", "Time Saved:", "0s/patient", accent_color, card_color, text_primary, text_secondary)
-        self._create_detail_row(value_frame, "weekly_hours", "Weekly Hours:", "0h saved", "#9c27b0", card_color, text_primary, text_secondary)
+        self._create_detail_row(value_frame, "efficiency", "Efficiency:", "0x faster", success_color, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(value_frame, "time_saved", "Time Saved:", "0s/patient", accent_color, card_color, text_primary, text_secondary, s)
+        self._create_detail_row(value_frame, "weekly_hours", "Weekly Hours:", "0h saved", "#9c27b0", card_color, text_primary, text_secondary, s)
 
         # Recommendation label
         self._labels['recommendation'] = tk.Label(
             value_frame,
             text="Gathering data...",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", _sf(8, s)),
             bg=card_color,
             fg=text_secondary,
-            wraplength=340,
+            wraplength=panel_width - int(40 * s),
             justify="left"
         )
-        self._labels['recommendation'].pack(fill=tk.X, padx=10, pady=(5, 10))
+        self._labels['recommendation'].pack(fill=tk.X, padx=int(8 * s), pady=(int(3 * s), int(6 * s)))
 
         # === DURATION ===
         duration_frame = tk.Frame(main_frame, bg=card_color)
@@ -997,38 +1025,38 @@ class AnalyticsDashboardOverlay:
         self._labels['duration'] = tk.Label(
             duration_frame,
             text="Session: 0m | Monitoring...",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", _sf(8, s)),
             bg=card_color,
             fg=text_secondary
         )
-        self._labels['duration'].pack(pady=8)
+        self._labels['duration'].pack(pady=int(6 * s))
 
-    def _create_section(self, parent, title, bg_color, text_color):
+    def _create_section(self, parent, title, bg_color, text_color, scale=1.0):
         """Create a section header."""
         tk.Label(
             parent,
             text=title,
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", _sf(9, scale), "bold"),
             bg=bg_color,
             fg=text_color,
             anchor="w"
         ).pack(fill=tk.X)
 
-    def _create_stat_box(self, parent, key, label, value, accent, bg_color, card_color, text_color):
+    def _create_stat_box(self, parent, key, label, value, accent, bg_color, card_color, text_color, scale=1.0):
         """Create a stat box widget."""
         frame = tk.Frame(parent, bg=card_color)
-        frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, int(3 * scale)))
 
         # Accent bar on left
-        tk.Frame(frame, bg=accent, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(frame, bg=accent, width=max(2, int(3 * scale))).pack(side=tk.LEFT, fill=tk.Y)
 
         content = tk.Frame(frame, bg=card_color)
-        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        content.pack(fill=tk.BOTH, expand=True, padx=int(6 * scale), pady=int(5 * scale))
 
         self._labels[f"{key}_value"] = tk.Label(
             content,
             text=value,
-            font=("Segoe UI", 18, "bold"),
+            font=("Segoe UI", _sf(14, scale), "bold"),
             bg=card_color,
             fg=text_color
         )
@@ -1037,20 +1065,20 @@ class AnalyticsDashboardOverlay:
         tk.Label(
             content,
             text=label,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", _sf(8, scale)),
             bg=card_color,
             fg="#888888"
         ).pack(anchor="w")
 
-    def _create_detail_row(self, parent, key, label, value, value_color, bg_color, text_color, label_color):
+    def _create_detail_row(self, parent, key, label, value, value_color, bg_color, text_color, label_color, scale=1.0):
         """Create a detail row."""
         row = tk.Frame(parent, bg=bg_color)
-        row.pack(fill=tk.X, padx=10, pady=2)
+        row.pack(fill=tk.X, padx=int(8 * scale), pady=1)
 
         tk.Label(
             row,
             text=label,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", _sf(8, scale)),
             bg=bg_color,
             fg=label_color,
             width=12,
@@ -1060,7 +1088,7 @@ class AnalyticsDashboardOverlay:
         self._labels[key] = tk.Label(
             row,
             text=value,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", _sf(8, scale), "bold"),
             bg=bg_color,
             fg=value_color
         )
@@ -1241,18 +1269,20 @@ class DemoStatusOverlay:
 
     def _create_panel(self):
         """Create the status bar panel — dynamically resizes to fit text."""
+        s = _compute_scale(self.root)
+        self._s = s
         self.panel = tk.Toplevel(self.root)
         self.panel.overrideredirect(True)
         self.panel.attributes("-topmost", True)
         self.panel.attributes("-alpha", 0.90)
 
-        self._panel_height = 38
-        self._radius = 12
+        self._panel_height = int(34 * s)
+        self._radius = int(10 * s)
         self._bg = "#2d2d2d"
         self._transparent = "#f0f0f0"
         self._screen_width = self.root.winfo_screenwidth()
         self._screen_height = self.root.winfo_screenheight()
-        self._y_pos = self._screen_height - self._panel_height - 200
+        self._y_pos = self._screen_height - self._panel_height - int(160 * s)
 
         self.panel.configure(bg=self._transparent)
         try:
@@ -1269,7 +1299,7 @@ class DemoStatusOverlay:
         self._status_label = tk.Label(
             self.panel,
             text=f"Inbound: {self._inbound_text}  |  Outbound: {self._outbound_text}",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", _sf(9, self._s)),
             bg=self._bg,
             fg="#e0e0e0"
         )
@@ -1391,24 +1421,26 @@ class DemoExtractedDataOverlay:
 
     def _create_panel(self):
         """Create the extracted data panel with rounded corners."""
+        s = _compute_scale(self.root)
+        self._s = s
         self.panel = tk.Toplevel(self.root)
         self.panel.overrideredirect(True)
         self.panel.attributes("-topmost", True)
         self.panel.attributes("-alpha", 0.92)
 
-        self._panel_width = 480
-        panel_height = 370
+        self._panel_width = int(400 * s)
+        panel_height = int(300 * s)
 
-        # Position bottom-left, 60px from bottom
+        # Position bottom-left
         screen_height = self.root.winfo_screenheight()
-        y_pos = screen_height - panel_height - 60
-        self.panel.geometry(f"{self._panel_width}x{panel_height}+20+{y_pos}")
+        y_pos = screen_height - panel_height - int(50 * s)
+        self.panel.geometry(f"{self._panel_width}x{panel_height}+{int(15 * s)}+{y_pos}")
 
         bg = "#2d2d2d"
         inner_bg = "#252525"
         text_fg = "#e0e0e0"
         muted_fg = "#9a9a9a"
-        radius = 18
+        radius = int(14 * s)
 
         # Use a transparent color trick for rounded corners on Windows
         transparent = "#f0f0f0"
@@ -1432,40 +1464,43 @@ class DemoExtractedDataOverlay:
         self._draw_rounded_rect(canvas, 0, 0, pw, panel_height, radius, bg)
 
         # Header area on canvas — title + count
+        hdr_y = int(8 * s)
+        sep_y = int(30 * s)
+        text_y = int(36 * s)
         self._title_label = tk.Label(
             self.panel,
             text="Extracted Data",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", _sf(9, s), "bold"),
             bg=bg, fg=text_fg
         )
-        canvas.create_window(14, 10, anchor="nw", window=self._title_label)
+        canvas.create_window(int(12 * s), hdr_y, anchor="nw", window=self._title_label)
 
         self._count_label = tk.Label(
             self.panel,
             text="0 patients",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", _sf(8, s)),
             bg=bg, fg=muted_fg
         )
-        canvas.create_window(pw - 14, 13, anchor="ne", window=self._count_label)
+        canvas.create_window(pw - int(12 * s), hdr_y + int(2 * s), anchor="ne", window=self._count_label)
 
         # Thin separator line on canvas
-        canvas.create_line(12, 34, pw - 12, 34, fill="#555555", width=1)
+        canvas.create_line(int(10 * s), sep_y, pw - int(10 * s), sep_y, fill="#555555", width=1)
 
         # Text widget for patient data — no wrapping so lines stay on one line
         self._data_text = tk.Text(
             self.panel,
             bg=inner_bg,
             fg=text_fg,
-            font=("Consolas", 9),
+            font=("Consolas", _sf(8, s)),
             wrap=tk.NONE,
             highlightthickness=0,
             borderwidth=0,
             insertbackground=text_fg,
-            padx=6,
-            pady=4
+            padx=int(5 * s),
+            pady=int(3 * s)
         )
         canvas.create_window(
-            12, 40, anchor="nw", width=pw - 24, height=panel_height - 56,
+            int(10 * s), text_y, anchor="nw", width=pw - int(20 * s), height=panel_height - text_y - int(14 * s),
             window=self._data_text
         )
         self._data_text.insert(tk.END, "Waiting for qualified patients...\n")

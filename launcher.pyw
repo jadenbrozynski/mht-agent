@@ -489,7 +489,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     def close_chart_window(chart_win):
         """
         Close a chart window (sidebar + main window) using pywinauto element detection.
-        Replaces hardcoded sidebar close (2432,185) + chart close (1782,1203) pairs.
+        Uses element detection, falls back to window-relative positions.
         Falls back to window-relative positions.
         """
         try:
@@ -585,7 +585,14 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                         btn_text = btn.window_text()
                         if btn_text in popup_buttons:
                             rect = btn.rectangle()
-                            if rect.left > 400 and rect.right < 1900 and rect.top > 150 and rect.bottom < 1050:
+                            # Use window-relative bounds to filter valid popup buttons
+                            _wr = win.rectangle()
+                            _ww = _wr.right - _wr.left
+                            _wh = _wr.bottom - _wr.top
+                            if (rect.left > _wr.left + int(_ww * 0.15)
+                                and rect.right < _wr.right - int(_ww * 0.15)
+                                and rect.top > _wr.top + int(_wh * 0.1)
+                                and rect.bottom < _wr.bottom - int(_wh * 0.1)):
                                 btn.click_input()
                                 control.add_log(f"Dismissed popup: {btn_text}")
                                 popup_dismissed = True
@@ -1037,12 +1044,14 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             log_win.attributes('-topmost', True)
             log_win.attributes('-alpha', 0.9)
 
-            # Position on LEFT side
-            log_width = 480
-            log_height = 420  # Compact height
+            # Dynamic sizing based on screen resolution
+            screen_width = patient_log_root.winfo_screenwidth()
             screen_height = patient_log_root.winfo_screenheight()
-            y_pos = screen_height - log_height - 120
-            log_win.geometry(f"{log_width}x{log_height}+40+{y_pos}")
+            _s = min(screen_width / 1920, screen_height / 1080)
+            log_width = int(380 * _s)
+            log_height = int(350 * _s)
+            y_pos = screen_height - log_height - int(100 * _s)
+            log_win.geometry(f"{log_width}x{log_height}+{int(30 * _s)}+{y_pos}")
 
             # Dark theme colors
             bg_color = "#1a1a24"
@@ -1193,7 +1202,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             rec_frame.pack(fill=tk.X, padx=8, pady=(5, 3))
             analytics_labels['recommendation'] = tk.Label(rec_frame, text="Gathering data...",
                                                           font=("Segoe UI", 8), bg=bg_color,
-                                                          fg=text_secondary, wraplength=440, justify="left")
+                                                          fg=text_secondary, wraplength=log_width - 40, justify="left")
             analytics_labels['recommendation'].pack(fill=tk.X)
 
             # === TAB SWITCHING LOGIC ===
@@ -1354,8 +1363,11 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     roomed_win.attributes('-alpha', 0.9)
 
                     screen_width = roomed_overlay_root.winfo_screenwidth()
-                    # Start at y=220 to avoid covering Close button at y=185
-                    roomed_win.geometry(f'400x250+{screen_width - 440}+220')
+                    screen_height = roomed_overlay_root.winfo_screenheight()
+                    _s = min(screen_width / 1920, screen_height / 1080)
+                    rw = int(320 * _s)
+                    rh = int(200 * _s)
+                    roomed_win.geometry(f'{rw}x{rh}+{screen_width - rw - int(30 * _s)}+{int(180 * _s)}')
                     roomed_win.configure(bg='#1a1a24')
 
                     # Register for global hide/show
@@ -1423,8 +1435,13 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     discharged_win.attributes('-alpha', 0.9)
 
                     screen_width = discharged_overlay_root.winfo_screenwidth()
-                    # Position below the Roomed Patients overlay (220 + 250 + 10 = 480)
-                    discharged_win.geometry(f'400x200+{screen_width - 440}+480')
+                    screen_height = discharged_overlay_root.winfo_screenheight()
+                    _s = min(screen_width / 1920, screen_height / 1080)
+                    dw = int(320 * _s)
+                    dh = int(170 * _s)
+                    # Position below roomed overlay
+                    roomed_bottom = int(180 * _s) + int(200 * _s) + int(8 * _s)
+                    discharged_win.geometry(f'{dw}x{dh}+{screen_width - dw - int(30 * _s)}+{roomed_bottom}')
                     discharged_win.configure(bg='#1a1a24')
 
                     register_overlay_window(discharged_win)
@@ -1489,8 +1506,11 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             data_win.attributes('-topmost', True)
             data_win.attributes('-alpha', 0.9)
 
-            # Position in TOP LEFT corner
-            data_win.geometry('450x400+40+40')
+            # Dynamic sizing - position in TOP LEFT corner
+            _sw = extracted_data_root.winfo_screenwidth()
+            _sh = extracted_data_root.winfo_screenheight()
+            _s = min(_sw / 1920, _sh / 1080)
+            data_win.geometry(f'{int(360 * _s)}x{int(320 * _s)}+{int(30 * _s)}+{int(30 * _s)}')
             data_win.configure(bg='#1a1a24')
 
             title_frame = tk.Frame(data_win, bg='#252532')
@@ -2029,11 +2049,13 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     pass
 
             try:
+                _demo_rect = demo_win.rectangle()
+                _gender_threshold = _demo_rect.top + int((_demo_rect.bottom - _demo_rect.top) * 0.6)
                 for rb in radios:
                     txt = rb.window_text()
                     if txt in ['Male', 'Female', 'Unknown']:
                         rect = rb.rectangle()
-                        if rect.top < 700:
+                        if rect.top < _gender_threshold:
                             try:
                                 legacy = rb.legacy_properties()
                                 state = legacy.get('State', 0)
@@ -2423,7 +2445,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                         txt = rb.window_text()
                         if txt in ['Male', 'Female', 'Unknown']:
                             rect = rb.rectangle()
-                            if rect.top < 700:
+                            # Use window-relative threshold (top 60% of window)
+                            _win_rect = demo_win.rectangle()
+                            _threshold = _win_rect.top + int((_win_rect.bottom - _win_rect.top) * 0.6)
+                            if rect.top < _threshold:
                                 try:
                                     legacy = rb.legacy_properties()
                                     state = legacy.get('State', 0)
@@ -2869,7 +2894,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 def _change_location(control):
     """Change clinic location to ATTALLA via menu navigation.
     Flow: CLICK Clinic menu → HOVER Current Clinic (opens submenu) → CLICK ATTALLA.
-    Uses fixed pixel offsets from window top-left (web app layout is fixed).
+    Uses pywinauto element detection first, falls back to proportional window offsets.
     """
     import pyautogui
     from pywinauto import Application, findwindows
@@ -2891,40 +2916,105 @@ def _change_location(control):
         win = app.window(handle=target_handle)
         win_rect = win.rectangle()
         w_left, w_top = win_rect.left, win_rect.top
-        control.add_log(f"Window rect: left={w_left}, top={w_top}, right={win_rect.right}, bottom={win_rect.bottom}")
+        w_width = win_rect.right - win_rect.left
+        w_height = win_rect.bottom - win_rect.top
+        control.add_log(f"Window rect: {w_left},{w_top} size={w_width}x{w_height}")
 
-        # Fixed pixel offsets from window top-left (from original 2560x1440 layout)
-        clinic_x = w_left + 177
-        clinic_y = w_top + 67
-        current_x = w_left + 223
-        current_y = w_top + 203
-        attalla_x = w_left + 399
-        attalla_y = w_top + 246
+        # Strategy 1: Try pywinauto element detection for clinic menu
+        clinic_found = False
+        try:
+            for elem in win.descendants():
+                try:
+                    name = (elem.element_info.name or '').lower()
+                    if 'clinic' in name and elem.element_info.control_type in ('MenuItem', 'Hyperlink', 'Button', 'ListItem'):
+                        rect = elem.rectangle()
+                        cx, cy = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+                        control.add_log(f"Found clinic element: '{elem.element_info.name}' at ({cx},{cy})")
+                        show_target(cx, cy, "CLINIC MENU", color="#2196F3", width=rect.right - rect.left + 20, height=rect.bottom - rect.top + 10, duration=0.8)
+                        time.sleep(0.6)
+                        pyautogui.click(cx, cy)
+                        clinic_found = True
+                        break
+                except:
+                    continue
+        except:
+            pass
 
-        # Step 1: CLICK Clinic menu (opens dropdown)
-        control.set_step("Opening Clinic menu...")
-        control.add_log(f"Clicking Clinic menu at ({clinic_x}, {clinic_y})")
-        show_target(clinic_x, clinic_y, "CLINIC MENU", color="#2196F3", width=120, height=35, duration=0.8)
-        time.sleep(0.6)
-        pyautogui.click(clinic_x, clinic_y)
+        # Strategy 2: Proportional window offsets (scales with window size)
+        if not clinic_found:
+            control.add_log("Clinic element not found via UIA, using proportional offsets")
+            clinic_x = w_left + int(w_width * 0.069)
+            clinic_y = w_top + int(w_height * 0.047)
+            show_target(clinic_x, clinic_y, "CLINIC MENU", color="#2196F3", width=100, height=30, duration=0.8)
+            time.sleep(0.6)
+            pyautogui.click(clinic_x, clinic_y)
+
         control.add_log("Clicked Clinic menu")
         time.sleep(1.0)
 
         # Step 2: HOVER Current Clinic (opens submenu - DO NOT click!)
         control.set_step("Hovering Current Clinic...")
-        control.add_log(f"Hovering Current Clinic at ({current_x}, {current_y})")
-        show_target(current_x, current_y, "CURRENT CLINIC", color="#FF9800", width=140, height=35, duration=0.8)
-        time.sleep(0.6)
-        pyautogui.moveTo(current_x, current_y, duration=0.3)
+
+        # Try element detection for Current Clinic menu item
+        current_found = False
+        try:
+            for elem in win.descendants():
+                try:
+                    name = (elem.element_info.name or '').lower()
+                    if 'current' in name and 'clinic' in name:
+                        rect = elem.rectangle()
+                        cx, cy = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+                        control.add_log(f"Found current clinic: '{elem.element_info.name}' at ({cx},{cy})")
+                        show_target(cx, cy, "CURRENT CLINIC", color="#FF9800", width=rect.right - rect.left + 20, height=rect.bottom - rect.top + 10, duration=0.8)
+                        time.sleep(0.6)
+                        pyautogui.moveTo(cx, cy, duration=0.3)
+                        current_found = True
+                        break
+                except:
+                    continue
+        except:
+            pass
+
+        if not current_found:
+            current_x = w_left + int(w_width * 0.087)
+            current_y = w_top + int(w_height * 0.141)
+            show_target(current_x, current_y, "CURRENT CLINIC", color="#FF9800", width=120, height=30, duration=0.8)
+            time.sleep(0.6)
+            pyautogui.moveTo(current_x, current_y, duration=0.3)
+
         control.add_log("Hovering over Current Clinic")
         time.sleep(1.0)
 
         # Step 3: CLICK ATTALLA
         control.set_step("Selecting ATTALLA...")
-        control.add_log(f"Clicking ATTALLA at ({attalla_x}, {attalla_y})")
-        show_target(attalla_x, attalla_y, "ATTALLA", color="#4CAF50", width=100, height=35, duration=0.8)
-        time.sleep(0.6)
-        pyautogui.click(attalla_x, attalla_y)
+
+        # Try element detection for ATTALLA
+        attalla_found = False
+        try:
+            for elem in win.descendants():
+                try:
+                    name = (elem.element_info.name or '').lower()
+                    if 'attalla' in name:
+                        rect = elem.rectangle()
+                        cx, cy = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+                        control.add_log(f"Found ATTALLA: '{elem.element_info.name}' at ({cx},{cy})")
+                        show_target(cx, cy, "ATTALLA", color="#4CAF50", width=rect.right - rect.left + 20, height=rect.bottom - rect.top + 10, duration=0.8)
+                        time.sleep(0.6)
+                        pyautogui.click(cx, cy)
+                        attalla_found = True
+                        break
+                except:
+                    continue
+        except:
+            pass
+
+        if not attalla_found:
+            attalla_x = w_left + int(w_width * 0.156)
+            attalla_y = w_top + int(w_height * 0.171)
+            show_target(attalla_x, attalla_y, "ATTALLA", color="#4CAF50", width=80, height=30, duration=0.8)
+            time.sleep(0.6)
+            pyautogui.click(attalla_x, attalla_y)
+
         control.add_log("Clicked ATTALLA - location changed!")
         time.sleep(1.5)
 

@@ -687,12 +687,14 @@ class OutboundWorker:
                     pass
 
             if not scan_upload_found:
-                # Fallback to window-relative position for Scan/Upload button
+                # Fallback: proportional window-relative position for Scan/Upload button
                 demo_rect = demo_win.rectangle()
-                scan_x = demo_rect.right - 50
-                scan_y = demo_rect.top + 60
+                win_w = demo_rect.right - demo_rect.left
+                win_h = demo_rect.bottom - demo_rect.top
+                scan_x = demo_rect.right - int(win_w * 0.03)
+                scan_y = demo_rect.top + int(win_h * 0.05)
                 pyautogui.click(scan_x, scan_y)
-                logger.info(f"Used window-relative fallback for Scan/Upload at ({scan_x}, {scan_y})")
+                logger.info(f"Used proportional fallback for Scan/Upload at ({scan_x}, {scan_y})")
 
             # ===== STEP 17: Wait for TWAIN popup =====
             logger.info("[Step 17] Waiting for TWAIN popup...")
@@ -713,17 +715,48 @@ class OutboundWorker:
                             pass
 
                     if demo_win:
+                        # Strategy 1: Find close/X button near the TWAIN element
+                        twain_elem = None
                         for elem in demo_win.descendants():
                             try:
                                 n = elem.element_info.name or ''
                                 if 'dynamic web twain' in n.lower():
-                                    rect = elem.rectangle()
-                                    pyautogui.click(rect.right + 29, rect.top - 67)
-                                    twain_closed = True
-                                    logger.info("Found and closed TWAIN popup")
+                                    twain_elem = elem
                                     break
                             except:
                                 pass
+
+                        if twain_elem:
+                            twain_rect = twain_elem.rectangle()
+                            # Look for a close/X button near the TWAIN popup
+                            close_found = False
+                            for elem in demo_win.descendants():
+                                try:
+                                    ct = elem.element_info.control_type
+                                    n = (elem.element_info.name or '').lower()
+                                    if ct == 'Button' and n in ('close', 'x', '\u2715', '\u2716', '\ue5cd'):
+                                        btn_rect = elem.rectangle()
+                                        # Must be near the TWAIN popup (within reasonable range)
+                                        if abs(btn_rect.top - twain_rect.top) < 150:
+                                            pyautogui.click((btn_rect.left + btn_rect.right) // 2, (btn_rect.top + btn_rect.bottom) // 2)
+                                            close_found = True
+                                            logger.info("Closed TWAIN popup via close button")
+                                            break
+                                except:
+                                    pass
+
+                            if not close_found:
+                                # Fallback: use proportional offset from TWAIN element
+                                # Close button is typically above-right of the popup title
+                                popup_width = twain_rect.right - twain_rect.left
+                                popup_height = twain_rect.bottom - twain_rect.top
+                                close_x = twain_rect.right + int(popup_width * 0.1)
+                                close_y = twain_rect.top - int(popup_height * 0.5)
+                                pyautogui.click(close_x, close_y)
+                                logger.info("Closed TWAIN popup via proportional offset")
+
+                            twain_closed = True
+
                     if twain_closed:
                         break
                 except:
@@ -755,11 +788,13 @@ class OutboundWorker:
 
             for _ in range(20):  # Poll for Mental list item
                 found = False
+                demo_rect_check = demo_win.rectangle()
+                min_top = demo_rect_check.top + int((demo_rect_check.bottom - demo_rect_check.top) * 0.08)
                 for elem in demo_win.descendants():
                     try:
                         if elem.element_info.control_type == 'ListItem' and 'mental' in (elem.element_info.name or '').lower():
                             rect = elem.rectangle()
-                            if rect.top > 100:
+                            if rect.top > min_top:
                                 pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
                                 found = True
                                 break
@@ -807,11 +842,15 @@ class OutboundWorker:
             logger.info("[Step 21] Closing Demographics...")
             self._update_overlay_step(21, 21, "Closing demographics tab...")
             close_buttons = []
+            demo_rect = demo_win.rectangle()
+            # Use window-relative thresholds instead of absolute pixels
+            title_zone_top = demo_rect.top + int((demo_rect.bottom - demo_rect.top) * 0.05)
+            title_zone_bottom = demo_rect.top + int((demo_rect.bottom - demo_rect.top) * 0.15)
             for elem in demo_win.descendants():
                 try:
                     if elem.element_info.control_type == 'Button' and elem.element_info.automation_id == 'PART_CloseButton':
                         rect = elem.rectangle()
-                        if rect.top > 100 and rect.top < 200:
+                        if rect.top > title_zone_top and rect.top < title_zone_bottom:
                             close_buttons.append(rect)
                 except:
                     pass
