@@ -53,6 +53,7 @@ class OutboundWorker:
         self._callback: Optional[Callable] = None
         self._processing = False  # Flag to indicate if currently processing
         self._overlay = overlay  # UI overlay for status updates
+        self.demo_mode = False  # Skip hide/show overlays in demo mode
 
     def set_callback(self, callback: Callable[[Dict], None]):
         """Set callback function called when an event is processed."""
@@ -84,6 +85,8 @@ class OutboundWorker:
 
     def _hide_all_overlays(self):
         """Hide patient overlays during outbound processing but keep control overlay visible."""
+        if self.demo_mode:
+            return  # No overlays to hide in demo mode
         try:
             from mhtagentic.desktop.control_overlay import hide_all_overlays, _all_overlay_windows
             # Only hide non-control overlays (patient highlights, etc.)
@@ -102,6 +105,8 @@ class OutboundWorker:
 
     def _show_all_overlays(self):
         """Show ALL overlays after outbound processing."""
+        if self.demo_mode:
+            return  # No overlays to restore in demo mode
         try:
             from mhtagentic.desktop.control_overlay import show_all_overlays
             show_all_overlays()
@@ -319,6 +324,7 @@ class OutboundWorker:
 
             # ===== STEP 3: Click chart icon =====
             logger.info("[Step 3] Clicking chart icon...")
+            self._update_overlay_step(3, 21, "Clicking chart icon...")
             images = patient_row.descendants(control_type='Image')
             chart_icon = images[0]
             rect = chart_icon.rectangle()
@@ -326,6 +332,7 @@ class OutboundWorker:
 
             # ===== STEP 4: Wait for chart window =====
             logger.info("[Step 4] Waiting for chart window...")
+            self._update_overlay_step(4, 21, "Loading chart...")
             chart_win = None
             for _ in range(30):  # Poll for chart window
                 try:
@@ -340,6 +347,7 @@ class OutboundWorker:
 
             # ===== STEP 5: Navigate to Procedures/Supplies =====
             logger.info("[Step 5] Clicking Procedures/Supplies...")
+            self._update_overlay_step(5, 21, "Opening Procedures/Supplies...")
             for _ in range(20):  # Poll for element
                 found = False
                 for elem in chart_win.descendants():
@@ -357,6 +365,7 @@ class OutboundWorker:
 
             # ===== STEP 6: Navigate to SIC COMMON ORDERS =====
             logger.info("[Step 6] Clicking SIC COMMON ORDERS...")
+            self._update_overlay_step(6, 21, "Opening SIC Common Orders...")
             for _ in range(20):  # Poll for element
                 found = False
                 for elem in chart_win.descendants():
@@ -375,6 +384,7 @@ class OutboundWorker:
 
             # ===== STEP 7: Click on assessment in list =====
             logger.info(f"[Step 7] Clicking {assess_name}...")
+            self._update_overlay_step(7, 21, f"Selecting {assess_name}...")
             for _ in range(20):  # Poll for element
                 found = False
                 for elem in chart_win.descendants():
@@ -395,6 +405,7 @@ class OutboundWorker:
 
             # ===== STEP 8: Click assessment description header =====
             logger.info("[Step 8] Clicking description header...")
+            self._update_overlay_step(8, 21, "Opening assessment form...")
             for _ in range(20):  # Poll for element
                 found = False
                 for elem in chart_win.descendants():
@@ -415,6 +426,7 @@ class OutboundWorker:
 
             # ===== STEP 9: Fill out the form =====
             logger.info("[Step 9] Filling out form...")
+            self._update_overlay_step(9, 21, "Filling assessment scores...")
             # Poll for radio buttons to appear
             all_radios = []
             for _ in range(20):
@@ -467,7 +479,12 @@ class OutboundWorker:
 
             # ===== STEP 10: Enter total score =====
             logger.info("[Step 10] Entering total score...")
-            pyautogui.click(1200, 800)
+            self._update_overlay_step(10, 21, f"Entering total score: {total_score}...")
+            # Click center of chart window to ensure focus before scrolling
+            chart_rect = chart_win.rectangle()
+            chart_center_x = (chart_rect.left + chart_rect.right) // 2
+            chart_center_y = (chart_rect.top + chart_rect.bottom) // 2
+            pyautogui.click(chart_center_x, chart_center_y)
             pyautogui.scroll(-500)
 
             for _ in range(20):  # Poll for total score field
@@ -490,6 +507,7 @@ class OutboundWorker:
 
             # ===== STEP 11: Cancel and delete =====
             logger.info("[Step 11] Clicking Cancel...")
+            self._update_overlay_step(11, 21, "Cancelling form...")
             pyautogui.scroll(500)
 
             for _ in range(20):  # Poll for cancel button
@@ -509,6 +527,7 @@ class OutboundWorker:
 
             # ===== STEP 12: Delete assessment =====
             logger.info("[Step 12] Deleting assessment...")
+            self._update_overlay_step(12, 21, "Deleting assessment...")
             phq_y = None
             for elem in chart_win.descendants():
                 try:
@@ -553,6 +572,7 @@ class OutboundWorker:
 
             # ===== STEP 13: Close chart =====
             logger.info("[Step 13] Closing chart...")
+            self._update_overlay_step(13, 21, "Saving and closing chart...")
             for _ in range(20):  # Poll for save button
                 found = False
                 for elem in chart_win.descendants():
@@ -667,9 +687,12 @@ class OutboundWorker:
                     pass
 
             if not scan_upload_found:
-                # Fallback to hardcoded position
-                pyautogui.click(2240, 243)
-                logger.info("Used fallback position for Scan/Upload")
+                # Fallback to window-relative position for Scan/Upload button
+                demo_rect = demo_win.rectangle()
+                scan_x = demo_rect.right - 50
+                scan_y = demo_rect.top + 60
+                pyautogui.click(scan_x, scan_y)
+                logger.info(f"Used window-relative fallback for Scan/Upload at ({scan_x}, {scan_y})")
 
             # ===== STEP 17: Wait for TWAIN popup =====
             logger.info("[Step 17] Waiting for TWAIN popup...")
@@ -723,7 +746,11 @@ class OutboundWorker:
                     break
                 time.sleep(0.05)  # Small delay to prevent UI overload
 
-            pyautogui.moveTo(1117, 850)
+            # Move to window center before scrolling
+            demo_rect = demo_win.rectangle()
+            demo_cx = (demo_rect.left + demo_rect.right) // 2
+            demo_cy = (demo_rect.top + demo_rect.bottom) // 2
+            pyautogui.moveTo(demo_cx, demo_cy)
             pyautogui.scroll(-1200)
 
             for _ in range(20):  # Poll for Mental list item

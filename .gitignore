@@ -41,10 +41,6 @@ config/.env
 *.tmp
 *.bak
 *.backup
-tmpclaude-*
-
-# Claude
-.claude/
 
 # Windows null device file
 nul

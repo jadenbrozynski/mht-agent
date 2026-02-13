@@ -242,12 +242,12 @@ class MHTDatabase:
 
             error_id = cursor.lastrowid
 
-            # Update event error count and status
+            # Increment error count
             cursor.execute("""
                 UPDATE common_event
-                SET error_count = error_count + 1, status = ?, updated_at = ?
+                SET error_count = error_count + 1, updated_at = ?
                 WHERE id = ?
-            """, (EventStatus.ERROR, now, event_id))
+            """, (now, event_id))
 
             conn.commit()
             return error_id

@@ -21,18 +21,33 @@ import time
 import os
 import tkinter as tk
 import threading
+import logging
 from pathlib import Path
 from datetime import datetime
+
+logger = logging.getLogger("mhtagentic.launcher")
 
 # Add project root to path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
+# Load .env file if present
+_env_path = SCRIPT_DIR / "config" / ".env"
+if _env_path.exists():
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 from mhtagentic.desktop.control_overlay import (
     ControlOverlay,
     reset_control_overlay,
     register_overlay_window,
-    unregister_overlay_window
+    unregister_overlay_window,
+    DemoStatusOverlay,
+    DemoExtractedDataOverlay
 )
 from mhtagentic.desktop.automation import DesktopAutomation
 from mhtagentic.desktop.analytics import (
@@ -271,9 +286,9 @@ def run_silent():
             pass
 
 
-# Stored credentials
-STORED_USERNAME = "RCALLAGHAN@STHRN"
-STORED_PASSWORD = "Mental@2026!!"
+# Credentials from environment (set in .env or system environment variables)
+STORED_USERNAME = os.environ.get("EXPERITY_USERNAME", "")
+STORED_PASSWORD = os.environ.get("EXPERITY_PASSWORD", "")
 
 
 def _show_element_overlay(element, label, color="#2196F3", duration=1.0):
@@ -289,7 +304,7 @@ def _show_element_overlay(element, label, color="#2196F3", duration=1.0):
         pass
 
 
-def _start_monitoring(control, outbound_worker=None):
+def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     """Start monitoring the Waiting Room with periodic refresh and patient tracking."""
     import pyautogui
     import threading
@@ -345,6 +360,179 @@ def _start_monitoring(control, outbound_worker=None):
                 pass
             time.sleep(0.05)
         return None
+
+    # === RESOLUTION-INDEPENDENT HELPERS ===
+
+    def extract_demographics_fields(demo_win):
+        """
+        Extract demographics fields by matching Text labels to nearby Edit fields.
+        Resolution-independent: uses label text and relative position instead of absolute coords.
+        """
+        fields = {}
+        try:
+            edits = demo_win.descendants(control_type='Edit')
+            texts = demo_win.descendants(control_type='Text')
+
+            # Build list of labels we care about
+            label_map = {
+                'First Name': 'first_name',
+                'Last Name': 'last_name',
+                'Date of Birth': 'dob',
+                'Cell Phone': 'cell_phone',
+                'Email': 'email',
+            }
+
+            # Find label positions
+            label_positions = []
+            for t in texts[:50]:
+                try:
+                    txt = t.window_text().strip()
+                    if txt in label_map:
+                        rect = t.rectangle()
+                        label_positions.append({
+                            'label': txt,
+                            'key': label_map[txt],
+                            'x': rect.left,
+                            'y': (rect.top + rect.bottom) // 2,
+                        })
+                except:
+                    pass
+
+            if not label_positions:
+                return fields
+
+            # Get window midpoint to distinguish left vs right side
+            win_rect = demo_win.rectangle()
+            mid_x = (win_rect.left + win_rect.right) // 2
+
+            # Build edit field positions
+            edit_entries = []
+            for edit in edits[:30]:
+                try:
+                    txt = edit.window_text()
+                    if not txt:
+                        continue
+                    rect = edit.rectangle()
+                    edit_entries.append({
+                        'text': txt,
+                        'x': rect.left,
+                        'y': (rect.top + rect.bottom) // 2,
+                        'side': 'left' if rect.left < mid_x else 'right',
+                    })
+                except:
+                    pass
+
+            # Match each label to the nearest Edit at approximately the same Y
+            for lbl in label_positions:
+                lbl_side = 'left' if lbl['x'] < mid_x else 'right'
+                best_edit = None
+                best_dist = 999999
+                for ed in edit_entries:
+                    # Must be on the same side of the window
+                    if ed['side'] != lbl_side:
+                        continue
+                    y_dist = abs(ed['y'] - lbl['y'])
+                    if y_dist < 40 and y_dist < best_dist:
+                        best_dist = y_dist
+                        best_edit = ed
+                if best_edit:
+                    fields[lbl['key']] = best_edit['text']
+        except Exception as e:
+            control.add_log(f"extract_demographics_fields error: {str(e)[:40]}")
+
+        return fields
+
+    def close_demographics_window(demo_win):
+        """
+        Close a Demographics popup window using pywinauto element detection.
+        Falls back to clicking the bottom-center of the window rect.
+        """
+        try:
+            # Strategy 1: Find Close/X button among descendants
+            buttons = demo_win.descendants(control_type='Button')
+            for btn in buttons:
+                try:
+                    btn_text = btn.window_text()
+                    if btn_text in ['Close', 'X', 'close', 'Cancel']:
+                        btn.click_input()
+                        return
+                except:
+                    continue
+
+            # Strategy 2: Look for a button near the bottom of the window
+            win_rect = demo_win.rectangle()
+            bottom_buttons = []
+            for btn in buttons:
+                try:
+                    rect = btn.rectangle()
+                    # Button in the bottom third of the window
+                    if rect.top > win_rect.top + (win_rect.bottom - win_rect.top) * 0.7:
+                        bottom_buttons.append((rect, btn))
+                except:
+                    continue
+
+            if bottom_buttons:
+                # Click the most centered bottom button
+                win_cx = (win_rect.left + win_rect.right) // 2
+                bottom_buttons.sort(key=lambda b: abs(((b[0].left + b[0].right) // 2) - win_cx))
+                rect = bottom_buttons[0][0]
+                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                return
+
+            # Strategy 3: Fall back to bottom-center of window
+            cx = (win_rect.left + win_rect.right) // 2
+            cy = win_rect.bottom - 30
+            pyautogui.click(cx, cy)
+        except Exception as e:
+            control.add_log(f"close_demographics_window error: {str(e)[:40]}")
+
+    def close_chart_window(chart_win):
+        """
+        Close a chart window (sidebar + main window) using pywinauto element detection.
+        Replaces hardcoded sidebar close (2432,185) + chart close (1782,1203) pairs.
+        Falls back to window-relative positions.
+        """
+        try:
+            win_rect = chart_win.rectangle()
+
+            # Strategy 1: Find close buttons via element detection
+            buttons = chart_win.descendants(control_type='Button')
+            close_buttons = []
+            for btn in buttons:
+                try:
+                    btn_text = btn.window_text()
+                    if btn_text in ['Close', 'X', 'close', '\ue5cd', '\u2715', '\u2716']:
+                        rect = btn.rectangle()
+                        close_buttons.append({
+                            'btn': btn,
+                            'rect': rect,
+                            'x': (rect.left + rect.right) // 2,
+                            'y': (rect.top + rect.bottom) // 2,
+                        })
+                except:
+                    continue
+
+            if close_buttons:
+                # Sort by X position descending - rightmost first (sidebar close), then main close
+                close_buttons.sort(key=lambda b: b['x'], reverse=True)
+                for cb in close_buttons:
+                    pyautogui.click(cb['x'], cb['y'])
+                    time.sleep(0.1)
+                return
+
+            # Strategy 2: Fall back to window-relative positions
+            # Sidebar close: near top-right of window
+            sidebar_x = win_rect.right - 30
+            sidebar_y = win_rect.top + 40
+            pyautogui.click(sidebar_x, sidebar_y)
+            time.sleep(0.1)
+
+            # Main chart close: center-bottom area of window
+            chart_cx = (win_rect.left + win_rect.right) // 2
+            chart_cy = win_rect.bottom - 30
+            pyautogui.click(chart_cx, chart_cy)
+        except Exception as e:
+            control.add_log(f"close_chart_window error: {str(e)[:40]}")
 
     # === BACKGROUND ERROR DETECTION THREAD ===
     # Runs continuously to catch Application Error popups without blocking main process
@@ -692,6 +880,14 @@ def _start_monitoring(control, outbound_worker=None):
 
     control.add_log(f"Connected: {win.window_text()}")
 
+    # Log window rect for resolution debugging
+    try:
+        win_rect = win.rectangle()
+        control.add_log(f"Window rect: left={win_rect.left}, top={win_rect.top}, right={win_rect.right}, bottom={win_rect.bottom}")
+        control.add_log(f"Window size: {win_rect.right - win_rect.left}x{win_rect.bottom - win_rect.top}")
+    except:
+        pass
+
     # Find UI elements
     control.set_step("Finding UI elements...")
 
@@ -722,806 +918,899 @@ def _start_monitoring(control, outbound_worker=None):
     control.set_status("Monitoring")
     control.set_step("Starting monitors...")
 
-    # === LEFT SIDE PATIENT LOG OVERLAY WITH TABS ===
-    patient_log_root = None
-    patient_log_text = None
-    cycle_label = None
-    cycle_history = {}  # Store data for each cycle: {cycle_num: [messages]}
-    current_view_cycle = [0]  # Use list to allow modification in nested functions
-    current_cycle_num = [0]  # Track the actual current cycle
-    current_tab = ["patients"]  # Track current tab: "patients" or "analytics"
-    analytics_labels = {}  # Store analytics label references for updates
-
-    def create_patient_log_overlay():
-        nonlocal patient_log_root, patient_log_text, cycle_label, analytics_labels
-        patient_log_root = tk.Tk()
-        patient_log_root.withdraw()
-
-        log_win = tk.Toplevel(patient_log_root)
-        log_win.overrideredirect(True)
-        log_win.attributes('-topmost', True)
-        log_win.attributes('-alpha', 0.9)
-
-        # Position on LEFT side
-        log_width = 480
-        log_height = 420  # Compact height
-        screen_height = patient_log_root.winfo_screenheight()
-        y_pos = screen_height - log_height - 120
-        log_win.geometry(f"{log_width}x{log_height}+40+{y_pos}")
-
-        # Dark theme colors
-        bg_color = "#1a1a24"
-        card_color = "#252532"
-        accent_color = "#5cb85c"
-        accent_analytics = "#4ECDC4"
-        text_primary = "#f0f0f0"
-        text_secondary = "#9a9a9a"
-
-        log_win.configure(bg=bg_color)
-
-        # Register for global hide/show
-        register_overlay_window(log_win)
-
-        # Title bar with navigation (draggable)
-        title_frame = tk.Frame(log_win, bg=card_color)
-        title_frame.pack(fill=tk.X)
-
-        # Make draggable
-        def start_drag(event):
-            log_win._drag_x = event.x
-            log_win._drag_y = event.y
-        def do_drag(event):
-            x = log_win.winfo_x() + (event.x - log_win._drag_x)
-            y = log_win.winfo_y() + (event.y - log_win._drag_y)
-            log_win.geometry(f"+{x}+{y}")
-        title_frame.bind("<Button-1>", start_drag)
-        title_frame.bind("<B1-Motion>", do_drag)
-
-        # Title
-        title_label = tk.Label(title_frame, text="MHT Monitor", font=("Segoe UI", 11, "bold"),
-                               bg=card_color, fg=text_primary)
-        title_label.pack(side=tk.LEFT, padx=10, pady=8)
-        title_label.bind("<Button-1>", start_drag)
-        title_label.bind("<B1-Motion>", do_drag)
-
-        # Live indicator
-        live_label = tk.Label(title_frame, text="● LIVE", font=("Segoe UI", 9, "bold"),
-                             bg=card_color, fg=accent_color)
-        live_label.pack(side=tk.RIGHT, padx=10, pady=8)
-
-        # === TAB BAR ===
-        tab_frame = tk.Frame(log_win, bg=bg_color)
-        tab_frame.pack(fill=tk.X)
-
-        # Tab buttons container
-        tabs_container = tk.Frame(tab_frame, bg=bg_color)
-        tabs_container.pack(fill=tk.X, padx=10, pady=(10, 0))
-
-        # Patients tab button
-        patients_tab_btn = tk.Label(tabs_container, text="  Patients  ", font=("Segoe UI", 10, "bold"),
-                                    bg=accent_color, fg="#1a1a24", cursor="hand2", padx=15, pady=6)
-        patients_tab_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        # Analytics tab button
-        analytics_tab_btn = tk.Label(tabs_container, text="  Analytics  ", font=("Segoe UI", 10),
-                                     bg=card_color, fg=text_secondary, cursor="hand2", padx=15, pady=6)
-        analytics_tab_btn.pack(side=tk.LEFT)
-
-        # === CONTENT FRAMES ===
-        # Patients content frame
-        patients_frame = tk.Frame(log_win, bg=bg_color)
-        patients_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Analytics content frame (hidden initially)
-        analytics_frame = tk.Frame(log_win, bg=bg_color)
-
-        # === PATIENTS TAB CONTENT ===
-        # Navigation for cycles
-        nav_frame = tk.Frame(patients_frame, bg=bg_color)
-        nav_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
-
-        back_btn = tk.Label(nav_frame, text="◀", font=("Segoe UI", 12, "bold"),
-                           bg=bg_color, fg="#888888", cursor="hand2")
-        back_btn.pack(side=tk.LEFT)
-        back_btn.bind("<Button-1>", lambda e: nav_cycle(-1))
-
-        cycle_label = tk.Label(nav_frame, text="Cycle 0", font=("Segoe UI", 10),
-                              bg=bg_color, fg=accent_color)
-        cycle_label.pack(side=tk.LEFT, padx=10)
-
-        fwd_btn = tk.Label(nav_frame, text="▶", font=("Segoe UI", 12, "bold"),
-                          bg=bg_color, fg="#888888", cursor="hand2")
-        fwd_btn.pack(side=tk.LEFT)
-        fwd_btn.bind("<Button-1>", lambda e: nav_cycle(1))
-
-        # Patient log text area
-        text_container = tk.Frame(patients_frame, bg=bg_color)
-        text_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-
-        patient_log_text = tk.Text(text_container, bg=card_color, fg=text_primary,
-                                   font=("Consolas", 9), wrap=tk.WORD,
-                                   highlightthickness=0, borderwidth=0)
-        patient_log_text.pack(fill=tk.BOTH, expand=True)
-        patient_log_text.insert(tk.END, "Waiting for first cycle...\n")
-        patient_log_text.config(state=tk.DISABLED)
-
-        # === ANALYTICS TAB CONTENT (Compact) ===
-        def create_stat_row(parent, label, key, value_color=accent_analytics):
-            row = tk.Frame(parent, bg=card_color)
-            row.pack(fill=tk.X, padx=8, pady=1)
-            tk.Label(row, text=label, font=("Segoe UI", 8), bg=card_color, fg=text_secondary,
-                    anchor="w", width=16).pack(side=tk.LEFT)
-            val_label = tk.Label(row, text="0", font=("Segoe UI", 8, "bold"), bg=card_color,
-                                fg=value_color, anchor="e")
-            val_label.pack(side=tk.RIGHT)
-            analytics_labels[key] = val_label
-
-        def create_section_header(parent, title, color=accent_analytics):
-            header = tk.Frame(parent, bg=bg_color)
-            header.pack(fill=tk.X, padx=8, pady=(8, 2))
-            tk.Frame(header, bg=color, width=3, height=12).pack(side=tk.LEFT, padx=(0, 5))
-            tk.Label(header, text=title, font=("Segoe UI", 9, "bold"), bg=bg_color,
-                    fg=text_primary).pack(side=tk.LEFT)
-
-        # Session Stats Section
-        create_section_header(analytics_frame, "Session Stats")
-        session_card = tk.Frame(analytics_frame, bg=card_color)
-        session_card.pack(fill=tk.X, padx=8, pady=2)
-
-        create_stat_row(session_card, "Duration:", "duration")
-        create_stat_row(session_card, "Patients:", "total_patients", "#5cb85c")
-        create_stat_row(session_card, "Success Rate:", "success_rate", "#5cb85c")
-        create_stat_row(session_card, "Avg Time:", "avg_time", "#f0ad4e")
-        create_stat_row(session_card, "Per Hour:", "patients_per_hour", "#9c27b0")
-
-        # Processing Breakdown Section
-        create_section_header(analytics_frame, "Breakdown", "#FF9800")
-        breakdown_card = tk.Frame(analytics_frame, bg=card_color)
-        breakdown_card.pack(fill=tk.X, padx=8, pady=2)
-
-        create_stat_row(breakdown_card, "Successful:", "successful", "#5cb85c")
-        create_stat_row(breakdown_card, "Partial:", "partial", "#f0ad4e")
-        create_stat_row(breakdown_card, "Failed:", "failed", "#d9534f")
-        create_stat_row(breakdown_card, "WR Scans:", "scans", accent_analytics)
-
-        # Value Assessment Section
-        create_section_header(analytics_frame, "Value", "#9c27b0")
-        value_card = tk.Frame(analytics_frame, bg=card_color)
-        value_card.pack(fill=tk.X, padx=8, pady=2)
-
-        create_stat_row(value_card, "Efficiency:", "efficiency", "#5cb85c")
-        create_stat_row(value_card, "Time Saved:", "time_saved", accent_analytics)
-        create_stat_row(value_card, "Weekly Saved:", "weekly_hours", "#9c27b0")
-
-        # Recommendation (compact)
-        rec_frame = tk.Frame(analytics_frame, bg=bg_color)
-        rec_frame.pack(fill=tk.X, padx=8, pady=(5, 3))
-        analytics_labels['recommendation'] = tk.Label(rec_frame, text="Gathering data...",
-                                                      font=("Segoe UI", 8), bg=bg_color,
-                                                      fg=text_secondary, wraplength=440, justify="left")
-        analytics_labels['recommendation'].pack(fill=tk.X)
-
-        # === TAB SWITCHING LOGIC ===
-        def switch_to_patients():
-            current_tab[0] = "patients"
-            analytics_frame.pack_forget()
-            patients_frame.pack(fill=tk.BOTH, expand=True)
-            patients_tab_btn.config(bg=accent_color, fg="#1a1a24", font=("Segoe UI", 10, "bold"))
-            analytics_tab_btn.config(bg=card_color, fg=text_secondary, font=("Segoe UI", 10))
-
-        def switch_to_analytics():
-            current_tab[0] = "analytics"
-            patients_frame.pack_forget()
-            analytics_frame.pack(fill=tk.BOTH, expand=True)
-            analytics_tab_btn.config(bg=accent_analytics, fg="#1a1a24", font=("Segoe UI", 10, "bold"))
-            patients_tab_btn.config(bg=card_color, fg=text_secondary, font=("Segoe UI", 10))
-            # Trigger an analytics update
-            update_analytics_tab()
-
-        patients_tab_btn.bind("<Button-1>", lambda e: switch_to_patients())
-        analytics_tab_btn.bind("<Button-1>", lambda e: switch_to_analytics())
-
-        # Hover effects for tabs
-        def tab_hover_enter(btn, is_active_check):
-            if current_tab[0] != is_active_check:
-                btn.config(bg="#3a3a4e")
-        def tab_hover_leave(btn, active_color, is_active_check):
-            if current_tab[0] != is_active_check:
-                btn.config(bg=card_color)
-            else:
-                btn.config(bg=active_color)
-
-        patients_tab_btn.bind("<Enter>", lambda e: tab_hover_enter(patients_tab_btn, "patients"))
-        patients_tab_btn.bind("<Leave>", lambda e: tab_hover_leave(patients_tab_btn, accent_color, "patients"))
-        analytics_tab_btn.bind("<Enter>", lambda e: tab_hover_enter(analytics_tab_btn, "analytics"))
-        analytics_tab_btn.bind("<Leave>", lambda e: tab_hover_leave(analytics_tab_btn, accent_analytics, "analytics"))
-
-        patient_log_root.mainloop()
-
-    def nav_cycle(direction):
-        """Navigate between cycles."""
-        if not cycle_history:
-            return
-        new_cycle = current_view_cycle[0] + direction
-        if new_cycle >= 1 and new_cycle <= current_cycle_num[0]:
-            current_view_cycle[0] = new_cycle
-            display_cycle(new_cycle)
-
-    def display_cycle(cycle_num):
-        """Display data for a specific cycle."""
-        if patient_log_root and patient_log_text:
-            patient_log_root.after(0, lambda: _do_display_cycle(cycle_num))
-
-    def _do_display_cycle(cycle_num):
-        if patient_log_text and cycle_label:
-            patient_log_text.config(state=tk.NORMAL)
-            patient_log_text.delete(1.0, tk.END)
-            if cycle_num in cycle_history:
-                for msg in cycle_history[cycle_num]:
-                    patient_log_text.insert(tk.END, msg + "\n")
-            patient_log_text.config(state=tk.DISABLED)
-            # Update cycle label
-            is_live = cycle_num == current_cycle_num[0]
-            cycle_label.config(text=f"Cycle {cycle_num}" + (" (LIVE)" if is_live else ""))
-
-    log_thread = threading.Thread(target=create_patient_log_overlay, daemon=True)
-    log_thread.start()
-    time.sleep(0.2)
-
-    def update_patient_log(message, new_cycle=None):
-        """Add message to patient log overlay."""
-        is_new_cycle = new_cycle is not None
-
-        if is_new_cycle:
-            current_cycle_num[0] = new_cycle
-            current_view_cycle[0] = new_cycle
-            cycle_history[new_cycle] = []
-
-        if current_cycle_num[0] > 0:
-            if current_cycle_num[0] not in cycle_history:
-                cycle_history[current_cycle_num[0]] = []
-            cycle_history[current_cycle_num[0]].append(message)
-
-        # Only update display if viewing current cycle
-        if current_view_cycle[0] == current_cycle_num[0]:
-            if patient_log_text and patient_log_root:
-                try:
-                    patient_log_root.after(0, lambda: _do_log_update(message, is_new_cycle))
-                except:
-                    pass
-
-    def _do_log_update(message, clear_first=False):
-        if patient_log_text and cycle_label:
-            patient_log_text.config(state=tk.NORMAL)
-            # Clear display if starting new cycle
-            if clear_first:
-                patient_log_text.delete(1.0, tk.END)
-            # If this is viewing current cycle, append
-            if current_view_cycle[0] == current_cycle_num[0]:
-                patient_log_text.insert(tk.END, message + "\n")
-                patient_log_text.see(tk.END)
-            cycle_label.config(text=f"Cycle {current_cycle_num[0]} (LIVE)")
-            patient_log_text.config(state=tk.DISABLED)
-
-    # Simple analytics data cache (updated in background)
-    analytics_cache = {
-        'duration': '0 min', 'total_patients': '0', 'success_rate': '0%',
-        'avg_time': '0s', 'patients_per_hour': '0', 'successful': '0',
-        'partial': '0', 'failed': '0', 'scans': '0', 'efficiency': '0x',
-        'time_saved': '0s', 'weekly_hours': '0h', 'recommendation': 'Gathering data...'
-    }
-
-    def update_analytics_cache():
-        """Update the analytics cache (called from main thread)."""
-        try:
-            stats = analytics.get_current_stats()
-            if stats:
-                analytics_cache['duration'] = f"{stats.get('duration_minutes', 0):.1f} min"
-                analytics_cache['total_patients'] = str(stats.get('total_patients_processed', 0))
-                analytics_cache['success_rate'] = f"{stats.get('success_rate', 0):.0f}%"
-                analytics_cache['avg_time'] = f"{stats.get('avg_time_per_patient_seconds', 0):.1f}s"
-                analytics_cache['patients_per_hour'] = f"{stats.get('patients_per_hour', 0):.1f}"
-                analytics_cache['successful'] = str(stats.get('successful_extractions', 0))
-                analytics_cache['partial'] = str(stats.get('partial_extractions', 0))
-                analytics_cache['failed'] = str(stats.get('failed_extractions', 0))
-                analytics_cache['scans'] = str(stats.get('waiting_room_scans', 0))
-                # DEBUG: Print analytics to console
-                print(f"[ANALYTICS] Patients: {analytics_cache['total_patients']}, Success: {analytics_cache['successful']}, Rate: {analytics_cache['success_rate']}")
-        except Exception as e:
-            print(f"[ANALYTICS ERROR] {e}")
-
-    def update_analytics_tab():
-        """Update the analytics tab display from cache."""
-        if not patient_log_root or not analytics_labels:
-            print(f"[ANALYTICS TAB] Cannot update - root: {patient_log_root is not None}, labels: {len(analytics_labels) if analytics_labels else 0}")
-            return
-        try:
-            def _do_update():
-                updated = 0
-                for key, val in analytics_cache.items():
-                    if key in analytics_labels:
-                        analytics_labels[key].config(text=val)
-                        updated += 1
-                print(f"[ANALYTICS TAB] Updated {updated} labels")
-            patient_log_root.after(0, _do_update)
-        except Exception as e:
-            print(f"[ANALYTICS TAB ERROR] {e}")
-
-    # === ROOMED PATIENTS OVERLAY (Top Right) ===
-    roomed_overlay_root = None
-    roomed_text = None
-    roomed_patients = []
-
-    def create_roomed_overlay():
-        nonlocal roomed_overlay_root, roomed_text
-        while True:
-            try:
-                roomed_overlay_root = tk.Tk()
-                roomed_overlay_root.withdraw()
-
-                roomed_win = tk.Toplevel(roomed_overlay_root)
-                roomed_win.overrideredirect(True)
-                roomed_win.attributes('-topmost', True)
-                roomed_win.attributes('-alpha', 0.9)
-
-                screen_width = roomed_overlay_root.winfo_screenwidth()
-                # Start at y=220 to avoid covering Close button at y=185
-                roomed_win.geometry(f'400x250+{screen_width - 440}+220')
-                roomed_win.configure(bg='#1a1a24')
-
-                # Register for global hide/show
-                register_overlay_window(roomed_win)
-
-                title_frame = tk.Frame(roomed_win, bg='#252532')
-                title_frame.pack(fill=tk.X)
-                tk.Label(title_frame, text='Roomed Patients', font=('Segoe UI', 11, 'bold'),
-                        bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
-
-                tk.Frame(roomed_win, bg='#FF9800', height=2).pack(fill=tk.X)
-
-                text_frame = tk.Frame(roomed_win, bg='#1a1a24')
-                text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-                roomed_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
-                                      font=('Consolas', 9), wrap=tk.WORD,
-                                      highlightthickness=0, borderwidth=0)
-                roomed_text.pack(fill=tk.BOTH, expand=True)
-                roomed_text.insert(tk.END, 'Waiting for patients to be roomed...\n')
-                roomed_text.config(state=tk.DISABLED)
-
-                roomed_overlay_root.mainloop()
-            except Exception as e:
-                print(f"Roomed overlay error: {e}")
-                time.sleep(0.5)
-                continue
-            break
-
-    roomed_thread = threading.Thread(target=create_roomed_overlay, daemon=True)
-    roomed_thread.start()
-    time.sleep(0.15)
-
-    def update_roomed(message):
-        if roomed_text and roomed_overlay_root:
-            try:
-                roomed_overlay_root.after(0, lambda: _do_roomed_update(message))
-            except:
-                pass
-
-    def _do_roomed_update(message):
-        try:
-            if roomed_text:
-                roomed_text.config(state=tk.NORMAL)
-                roomed_text.insert(tk.END, message + "\n")
-                roomed_text.see(tk.END)
-                roomed_text.config(state=tk.DISABLED)
-        except:
-            pass
-
-    # === DISCHARGED PATIENTS OVERLAY (Below Roomed - Top Right) ===
-    discharged_overlay_root = None
-    discharged_text = None
-
-    def create_discharged_overlay():
-        nonlocal discharged_overlay_root, discharged_text
-        while True:
-            try:
-                discharged_overlay_root = tk.Tk()
-                discharged_overlay_root.withdraw()
-
-                discharged_win = tk.Toplevel(discharged_overlay_root)
-                discharged_win.overrideredirect(True)
-                discharged_win.attributes('-topmost', True)
-                discharged_win.attributes('-alpha', 0.9)
-
-                screen_width = discharged_overlay_root.winfo_screenwidth()
-                # Position below the Roomed Patients overlay (220 + 250 + 10 = 480)
-                discharged_win.geometry(f'400x200+{screen_width - 440}+480')
-                discharged_win.configure(bg='#1a1a24')
-
-                register_overlay_window(discharged_win)
-
-                title_frame = tk.Frame(discharged_win, bg='#252532')
-                title_frame.pack(fill=tk.X)
-                tk.Label(title_frame, text='Discharged Patients', font=('Segoe UI', 11, 'bold'),
-                        bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
-
-                tk.Frame(discharged_win, bg='#9C27B0', height=2).pack(fill=tk.X)  # Purple accent
-
-                text_frame = tk.Frame(discharged_win, bg='#1a1a24')
-                text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-                discharged_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
-                                          font=('Consolas', 9), wrap=tk.WORD,
-                                          highlightthickness=0, borderwidth=0)
-                discharged_text.pack(fill=tk.BOTH, expand=True)
-                discharged_text.insert(tk.END, 'Tracking discharges...\n')
-                discharged_text.config(state=tk.DISABLED)
-
-                discharged_overlay_root.mainloop()
-            except Exception as e:
-                print(f"Discharged overlay error: {e}")
-                time.sleep(0.5)
-                continue
-            break
-
-    discharged_thread = threading.Thread(target=create_discharged_overlay, daemon=True)
-    discharged_thread.start()
-    time.sleep(0.15)
-
-    def update_discharged(message):
-        if discharged_text and discharged_overlay_root:
-            try:
-                discharged_overlay_root.after(0, lambda: _do_discharged_update(message))
-            except:
-                pass
-
-    def _do_discharged_update(message):
-        try:
-            if discharged_text:
-                discharged_text.config(state=tk.NORMAL)
-                discharged_text.insert(tk.END, message + "\n")
-                discharged_text.see(tk.END)
-                discharged_text.config(state=tk.DISABLED)
-        except:
-            pass
-
-    # === EXTRACTED PATIENT DATA OVERLAY (Top Left) ===
-    extracted_data_root = None
-    extracted_data_text = None
-    extracted_patients_list = []  # Store all extracted patient data
-
-    def create_extracted_data_overlay():
-        nonlocal extracted_data_root, extracted_data_text
-        extracted_data_root = tk.Tk()
-        extracted_data_root.withdraw()
-
-        data_win = tk.Toplevel(extracted_data_root)
-        data_win.overrideredirect(True)
-        data_win.attributes('-topmost', True)
-        data_win.attributes('-alpha', 0.9)
-
-        # Position in TOP LEFT corner
-        data_win.geometry('450x400+40+40')
-        data_win.configure(bg='#1a1a24')
-
-        title_frame = tk.Frame(data_win, bg='#252532')
-        title_frame.pack(fill=tk.X)
-        tk.Label(title_frame, text='Extracted Patient Data', font=('Segoe UI', 11, 'bold'),
-                bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
-
-        # Patient count
-        count_label = tk.Label(title_frame, text='0 patients', font=('Segoe UI', 9),
-                              bg='#252532', fg='#5cb85c')
-        count_label.pack(side=tk.RIGHT, padx=10, pady=8)
-
-        tk.Frame(data_win, bg='#2196F3', height=2).pack(fill=tk.X)  # Blue accent
-
-        text_frame = tk.Frame(data_win, bg='#1a1a24')
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        extracted_data_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
-                                      font=('Consolas', 9), wrap=tk.WORD,
-                                      highlightthickness=0, borderwidth=0)
-        extracted_data_text.pack(fill=tk.BOTH, expand=True)
-        extracted_data_text.insert(tk.END, 'Waiting for qualified patients...\n')
-        extracted_data_text.config(state=tk.DISABLED)
-
-        # Store count label for updates
-        data_win.count_label = count_label
-
-        register_overlay_window(data_win)
-
-        extracted_data_root.mainloop()
-
-    extracted_data_thread = threading.Thread(target=create_extracted_data_overlay, daemon=True)
-    extracted_data_thread.start()
-    time.sleep(0.15)
-
-    def update_extracted_data(patient_data):
-        """Add a new patient's extracted data to the overlay."""
-        if extracted_data_text and extracted_data_root:
-            extracted_patients_list.append(patient_data)
-            try:
-                extracted_data_root.after(0, lambda: _do_extracted_update(patient_data))
-            except:
-                pass
-
-    def _do_extracted_update(patient_data):
-        if extracted_data_text:
-            extracted_data_text.config(state=tk.NORMAL)
-
-            # Format patient data nicely
-            name = patient_data.get('name', 'Unknown')
-            first = patient_data.get('first_name', '')
-            last = patient_data.get('last_name', '')
-            dob = patient_data.get('dob', 'N/A')
-            mrn = patient_data.get('mrn', 'N/A')
-            phone = patient_data.get('cell_phone', 'N/A')
-            email = patient_data.get('email', 'N/A')
-            gender = patient_data.get('gender', 'N/A')
-            insurance = patient_data.get('insurance', 'N/A')
-            race = patient_data.get('race', 'N/A')
-            ethnicity = patient_data.get('ethnicity', 'N/A')
-            language = patient_data.get('language', 'N/A')
-            pharmacy = patient_data.get('pharmacy', 'N/A')
-
-            # Clear on first entry
-            if len(extracted_patients_list) == 1:
-                extracted_data_text.delete(1.0, tk.END)
-
-            # Add separator between patients
-            if len(extracted_patients_list) > 1:
-                extracted_data_text.insert(tk.END, "-" * 40 + "\n")
-
-            # Display formatted data
-            extracted_data_text.insert(tk.END, f"Name: {last}, {first}\n")
-            extracted_data_text.insert(tk.END, f"DOB: {dob}\n")
-            extracted_data_text.insert(tk.END, f"MRN: {mrn}\n")
-            extracted_data_text.insert(tk.END, f"Phone: {phone}\n")
-            extracted_data_text.insert(tk.END, f"Email: {email}\n")
-            extracted_data_text.insert(tk.END, f"Gender: {gender}\n")
-            extracted_data_text.insert(tk.END, f"Insurance: {insurance}\n")
-            extracted_data_text.insert(tk.END, f"Race: {race}\n")
-            extracted_data_text.insert(tk.END, f"Ethnicity: {ethnicity}\n")
-            extracted_data_text.insert(tk.END, f"Language: {language}\n")
-            extracted_data_text.insert(tk.END, f"Pharmacy: {pharmacy}\n")
-
-            extracted_data_text.see(tk.END)
-            extracted_data_text.config(state=tk.DISABLED)
-
-    # Previous patient tracking for roomed detection
-    previous_patients = {}
-
-    # === WAITING ROOM HEADER OVERLAY ===
-    wr_overlay_root = None
-
-    def create_wr_overlay():
-        nonlocal wr_overlay_root
-        wr_overlay_root = tk.Tk()
-        wr_overlay_root.withdraw()
-
-        overlay = tk.Toplevel(wr_overlay_root)
-        overlay.overrideredirect(True)
-        overlay.attributes('-topmost', True)
-        overlay.attributes('-alpha', 0.5)
-        overlay.geometry(f"{WR_WIDTH}x{WR_HEIGHT}+{WR_X}+{WR_Y}")
-
-        frame = tk.Frame(overlay, bg='#00FF00', highlightthickness=3, highlightbackground='#00FF00')
-        frame.pack(fill=tk.BOTH, expand=True)
-        inner = tk.Frame(frame, bg='black')
-        inner.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
-        try:
-            overlay.attributes('-transparentcolor', 'black')
-        except:
-            pass
-
-        label_win = tk.Toplevel(wr_overlay_root)
-        label_win.overrideredirect(True)
-        label_win.attributes('-topmost', True)
-        tk.Label(label_win, text="MONITORING", font=("Segoe UI", 9, "bold"),
-                bg='#00AA00', fg='white', padx=6, pady=3).pack()
-        label_win.geometry(f"+{WR_X + WR_WIDTH + 5}+{WR_Y}")
-
-        register_overlay_window(overlay)
-        register_overlay_window(label_win)
-
-        wr_overlay_root.mainloop()
-
-    wr_thread = threading.Thread(target=create_wr_overlay, daemon=True)
-    wr_thread.start()
-    time.sleep(0.15)
-
-    control.add_log("Overlays active")
-    update_patient_log("=== MONITORING ACTIVE ===")
-
-    # === ANALYTICS INITIALIZATION ===
-    analytics = get_analytics()
-    analytics.start_session()
-    control.add_log(f"Analytics session started: {analytics.current_session.session_id}")
-
-    # Callback to update analytics UI
-    def update_analytics_display(stats):
-        control.add_log(f"Analytics callback! Patients: {stats.get('total_patients_processed', 0) if stats else 0}")
-        try:
-            update_analytics_cache()
-            update_analytics_tab()
-        except Exception as e:
-            control.add_log(f"Analytics callback err: {e}")
-
-    analytics.set_stats_callback(update_analytics_display)
-
-    # === PATIENT ROW OVERLAY FUNCTIONS ===
-    # Single shared root for all patient overlays (created in main thread context)
-    patient_overlay_root = None
-    patient_overlay_toplevels = []  # Store just the Toplevel windows
-
-    def init_patient_overlay_root():
-        """Initialize the shared root for patient overlays."""
-        nonlocal patient_overlay_root
-        patient_overlay_root = tk.Tk()
-        patient_overlay_root.withdraw()
-        patient_overlay_root.mainloop()
-
-    # Start the overlay root in background thread
-    overlay_root_thread = threading.Thread(target=init_patient_overlay_root, daemon=True)
-    overlay_root_thread.start()
-    time.sleep(0.15)
-
-    def create_patient_row_overlay(rect, name, color="#00FF00"):
-        """Create overlay border around a patient row. Returns list of Toplevel windows."""
-        toplevels = []
-
-        # Use actual rect dimensions from DataItem
-        row_x = rect.left
-        row_y = rect.top
-        row_width = rect.right - rect.left
-        row_height = rect.bottom - rect.top
-        border_width = 3
-
-        def create_borders():
-            nonlocal toplevels
-            # Top border
-            top = tk.Toplevel(patient_overlay_root)
-            top.overrideredirect(True)
-            top.attributes('-topmost', True)
-            top.attributes('-alpha', 0.8)
-            top.geometry(f"{row_width}x{border_width}+{row_x}+{row_y}")
-            top.configure(bg=color)
-            toplevels.append(top)
-            register_overlay_window(top)
-
-            # Bottom border
-            bottom = tk.Toplevel(patient_overlay_root)
-            bottom.overrideredirect(True)
-            bottom.attributes('-topmost', True)
-            bottom.attributes('-alpha', 0.8)
-            bottom.geometry(f"{row_width}x{border_width}+{row_x}+{row_y + row_height - border_width}")
-            bottom.configure(bg=color)
-            toplevels.append(bottom)
-            register_overlay_window(bottom)
-
-            # Left border
-            left = tk.Toplevel(patient_overlay_root)
-            left.overrideredirect(True)
-            left.attributes('-topmost', True)
-            left.attributes('-alpha', 0.8)
-            left.geometry(f"{border_width}x{row_height}+{row_x}+{row_y}")
-            left.configure(bg=color)
-            toplevels.append(left)
-            register_overlay_window(left)
-
-            # Right border
-            right = tk.Toplevel(patient_overlay_root)
-            right.overrideredirect(True)
-            right.attributes('-topmost', True)
-            right.attributes('-alpha', 0.8)
-            right.geometry(f"{border_width}x{row_height}+{row_x + row_width - border_width}+{row_y}")
-            right.configure(bg=color)
-            toplevels.append(right)
-            register_overlay_window(right)
-
-        # Schedule creation in the overlay root's thread
-        if patient_overlay_root:
-            patient_overlay_root.after(0, create_borders)
-            time.sleep(0.05)  # Give time for creation
-
-        return toplevels
-
-    def clear_patient_overlays():
-        """Clear patient row overlays (red/blue borders)."""
-        nonlocal patient_overlay_toplevels
-
-        def do_clear():
-            for tl in patient_overlay_toplevels:
-                try:
-                    unregister_overlay_window(tl)
-                    tl.destroy()
-                except:
-                    pass
-
-        if patient_overlay_root:
-            patient_overlay_root.after(0, do_clear)
-            time.sleep(0.1)  # Give time for overlays to clear
-
+    # Demo overlay references (used in finally block)
+    demo_status_overlay = None
+    demo_extracted_overlay = None
+
+    if demo_mode:
+        # === DEMO MODE: Minimal overlays ===
+        control.hide()
+
+        demo_status_overlay = DemoStatusOverlay()
+        demo_status_overlay.start()
+        demo_extracted_overlay = DemoExtractedDataOverlay()
+        demo_extracted_overlay.start()
+
+        # Initialize all overlay variables to None so monitoring loop references work
+        patient_log_root = patient_log_text = cycle_label = None
+        roomed_overlay_root = roomed_text = None
+        discharged_overlay_root = discharged_text = None
+        extracted_data_root = extracted_data_text = None
+        wr_overlay_root = patient_overlay_root = None
         patient_overlay_toplevels = []
+        extracted_patients_list = []
+        roomed_patients = []
+        previous_patients = {}
+        cycle_history = {}
+        current_view_cycle = [0]
+        current_cycle_num = [0]
+        analytics_labels = {}
 
-    def lift_info_overlays():
-        """Bring info overlays (patient log, roomed, discharged) to top of z-order."""
-        def do_lift(root):
-            if root:
-                try:
-                    for child in root.winfo_children():
-                        try:
-                            child.lift()
-                            child.attributes('-topmost', True)
-                        except:
-                            pass
-                except:
-                    pass
+        # Redefine callbacks to route to demo overlays
+        def update_patient_log(message, new_cycle=None):
+            pass  # No patient log in demo mode
 
-        # Lift all info overlays above patient row overlays
-        for root in [patient_log_root, roomed_overlay_root, discharged_overlay_root, extracted_data_root]:
-            if root:
-                try:
-                    root.after(0, lambda r=root: do_lift(r))
-                except:
-                    pass
+        def update_extracted_data(patient_data):
+            demo_extracted_overlay.add_patient(patient_data)
 
-    def show_patient_overlays(patients):
-        """Show overlay borders around patient rows with qualification colors.
-        Colors: GREEN = extracted, BLUE = qualified (not yet extracted), RED = not qualified
-        """
-        nonlocal patient_overlay_toplevels
+        def update_roomed(message):
+            pass
 
-        # Create new overlays for each patient
-        for p in patients:
-            rect = p.get('rect')
-            name = p.get('name', 'Patient')
-            if rect:
-                # Check qualification
+        def update_discharged(message):
+            pass
+
+        def show_patient_overlays(patients):
+            # Set qualification data on each patient (no visual overlays)
+            for p in patients:
+                name = p.get('name', 'Patient')
                 qualified, reason = check_qualification(p)
                 p['qualified'] = qualified
                 p['reason'] = reason
-
-                # Determine color based on status
                 patient_status = p.get('status', '').upper()
                 patient_notes = p.get('notes', '').strip()
-
                 if name in processed_patients:
-                    color = "#4CAF50"  # GREEN - already extracted
                     p['extracted'] = True
                 elif 'LOGGING' in patient_status:
-                    # LOGGING status means patient is still being logged in - skip
-                    color = "#FF9800"  # ORANGE - still logging in, wait
                     p['extracted'] = False
-                    p['qualified'] = False  # Mark as not qualified until logged
+                    p['qualified'] = False
                     p['reason'] = "Logging - waiting to complete"
                 elif 'LOGPENDING' in patient_status:
-                    # LOGPENDING status means patient registration is pending - skip
-                    color = "#FF9800"  # ORANGE - log pending, wait for completion
                     p['extracted'] = False
-                    p['qualified'] = False  # Mark as not qualified until status changes
+                    p['qualified'] = False
                     p['reason'] = "LogPending - waiting for status update"
                 elif 'CHARTING' in patient_status and not patient_notes:
-                    # Charting but no notes yet - highlight orange, skip for now
-                    color = "#FF9800"  # ORANGE - charting with no notes, wait
                     p['extracted'] = False
-                    p['qualified'] = False  # Mark as not qualified until notes added
+                    p['qualified'] = False
                     p['reason'] = "Charting - waiting for notes"
                 elif qualified:
-                    # LOGGED status patients with notes are eligible if they qualify
-                    color = "#2196F3"  # BLUE - qualified, not yet extracted
                     p['extracted'] = False
                 else:
-                    color = "#F44336"  # RED - not qualified
                     p['extracted'] = False
 
-                # Create overlay and track the toplevels
-                new_toplevels = create_patient_row_overlay(rect, name, color)
-                patient_overlay_toplevels.extend(new_toplevels)
+        def clear_patient_overlays():
+            pass
 
-        # Lift info overlays above patient row overlays
-        lift_info_overlays()
+        def lift_info_overlays():
+            pass
+
+        def update_analytics_cache():
+            pass
+
+        def update_analytics_tab():
+            pass
+
+        # Wrap control.set_step to feed demo status bar
+        # Route outbound steps (contain "Step X/21") to the Outbound side
+        _orig_set_step = control.set_step
+        def _demo_set_step(text):
+            _orig_set_step(text)
+            if 'Step ' in text and '/21' in text:
+                demo_status_overlay.update_status(inbound_text="Idle", outbound_text=text)
+            else:
+                demo_status_overlay.update_status(inbound_text=text)
+        control.set_step = _demo_set_step
+
+        # Analytics still runs (writes to DB) but no dashboard overlay
+        analytics = get_analytics()
+        analytics.start_session()
+        control.add_log(f"Demo mode - analytics session started: {analytics.current_session.session_id}")
+
+    else:
+
+        # === LEFT SIDE PATIENT LOG OVERLAY WITH TABS ===
+        patient_log_root = None
+        patient_log_text = None
+        cycle_label = None
+        cycle_history = {}  # Store data for each cycle: {cycle_num: [messages]}
+        current_view_cycle = [0]  # Use list to allow modification in nested functions
+        current_cycle_num = [0]  # Track the actual current cycle
+        current_tab = ["patients"]  # Track current tab: "patients" or "analytics"
+        analytics_labels = {}  # Store analytics label references for updates
+
+        def create_patient_log_overlay():
+            nonlocal patient_log_root, patient_log_text, cycle_label, analytics_labels
+            patient_log_root = tk.Tk()
+            patient_log_root.withdraw()
+
+            log_win = tk.Toplevel(patient_log_root)
+            log_win.overrideredirect(True)
+            log_win.attributes('-topmost', True)
+            log_win.attributes('-alpha', 0.9)
+
+            # Position on LEFT side
+            log_width = 480
+            log_height = 420  # Compact height
+            screen_height = patient_log_root.winfo_screenheight()
+            y_pos = screen_height - log_height - 120
+            log_win.geometry(f"{log_width}x{log_height}+40+{y_pos}")
+
+            # Dark theme colors
+            bg_color = "#1a1a24"
+            card_color = "#252532"
+            accent_color = "#5cb85c"
+            accent_analytics = "#4ECDC4"
+            text_primary = "#f0f0f0"
+            text_secondary = "#9a9a9a"
+
+            log_win.configure(bg=bg_color)
+
+            # Register for global hide/show
+            register_overlay_window(log_win)
+
+            # Title bar with navigation (draggable)
+            title_frame = tk.Frame(log_win, bg=card_color)
+            title_frame.pack(fill=tk.X)
+
+            # Make draggable
+            def start_drag(event):
+                log_win._drag_x = event.x
+                log_win._drag_y = event.y
+            def do_drag(event):
+                x = log_win.winfo_x() + (event.x - log_win._drag_x)
+                y = log_win.winfo_y() + (event.y - log_win._drag_y)
+                log_win.geometry(f"+{x}+{y}")
+            title_frame.bind("<Button-1>", start_drag)
+            title_frame.bind("<B1-Motion>", do_drag)
+
+            # Title
+            title_label = tk.Label(title_frame, text="MHT Monitor", font=("Segoe UI", 11, "bold"),
+                                   bg=card_color, fg=text_primary)
+            title_label.pack(side=tk.LEFT, padx=10, pady=8)
+            title_label.bind("<Button-1>", start_drag)
+            title_label.bind("<B1-Motion>", do_drag)
+
+            # Live indicator
+            live_label = tk.Label(title_frame, text="● LIVE", font=("Segoe UI", 9, "bold"),
+                                 bg=card_color, fg=accent_color)
+            live_label.pack(side=tk.RIGHT, padx=10, pady=8)
+
+            # === TAB BAR ===
+            tab_frame = tk.Frame(log_win, bg=bg_color)
+            tab_frame.pack(fill=tk.X)
+
+            # Tab buttons container
+            tabs_container = tk.Frame(tab_frame, bg=bg_color)
+            tabs_container.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+            # Patients tab button
+            patients_tab_btn = tk.Label(tabs_container, text="  Patients  ", font=("Segoe UI", 10, "bold"),
+                                        bg=accent_color, fg="#1a1a24", cursor="hand2", padx=15, pady=6)
+            patients_tab_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+            # Analytics tab button
+            analytics_tab_btn = tk.Label(tabs_container, text="  Analytics  ", font=("Segoe UI", 10),
+                                         bg=card_color, fg=text_secondary, cursor="hand2", padx=15, pady=6)
+            analytics_tab_btn.pack(side=tk.LEFT)
+
+            # === CONTENT FRAMES ===
+            # Patients content frame
+            patients_frame = tk.Frame(log_win, bg=bg_color)
+            patients_frame.pack(fill=tk.BOTH, expand=True)
+
+            # Analytics content frame (hidden initially)
+            analytics_frame = tk.Frame(log_win, bg=bg_color)
+
+            # === PATIENTS TAB CONTENT ===
+            # Navigation for cycles
+            nav_frame = tk.Frame(patients_frame, bg=bg_color)
+            nav_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+            back_btn = tk.Label(nav_frame, text="◀", font=("Segoe UI", 12, "bold"),
+                               bg=bg_color, fg="#888888", cursor="hand2")
+            back_btn.pack(side=tk.LEFT)
+            back_btn.bind("<Button-1>", lambda e: nav_cycle(-1))
+
+            cycle_label = tk.Label(nav_frame, text="Cycle 0", font=("Segoe UI", 10),
+                                  bg=bg_color, fg=accent_color)
+            cycle_label.pack(side=tk.LEFT, padx=10)
+
+            fwd_btn = tk.Label(nav_frame, text="▶", font=("Segoe UI", 12, "bold"),
+                              bg=bg_color, fg="#888888", cursor="hand2")
+            fwd_btn.pack(side=tk.LEFT)
+            fwd_btn.bind("<Button-1>", lambda e: nav_cycle(1))
+
+            # Patient log text area
+            text_container = tk.Frame(patients_frame, bg=bg_color)
+            text_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+            patient_log_text = tk.Text(text_container, bg=card_color, fg=text_primary,
+                                       font=("Consolas", 9), wrap=tk.WORD,
+                                       highlightthickness=0, borderwidth=0)
+            patient_log_text.pack(fill=tk.BOTH, expand=True)
+            patient_log_text.insert(tk.END, "Waiting for first cycle...\n")
+            patient_log_text.config(state=tk.DISABLED)
+
+            # === ANALYTICS TAB CONTENT (Compact) ===
+            def create_stat_row(parent, label, key, value_color=accent_analytics):
+                row = tk.Frame(parent, bg=card_color)
+                row.pack(fill=tk.X, padx=8, pady=1)
+                tk.Label(row, text=label, font=("Segoe UI", 8), bg=card_color, fg=text_secondary,
+                        anchor="w", width=16).pack(side=tk.LEFT)
+                val_label = tk.Label(row, text="0", font=("Segoe UI", 8, "bold"), bg=card_color,
+                                    fg=value_color, anchor="e")
+                val_label.pack(side=tk.RIGHT)
+                analytics_labels[key] = val_label
+
+            def create_section_header(parent, title, color=accent_analytics):
+                header = tk.Frame(parent, bg=bg_color)
+                header.pack(fill=tk.X, padx=8, pady=(8, 2))
+                tk.Frame(header, bg=color, width=3, height=12).pack(side=tk.LEFT, padx=(0, 5))
+                tk.Label(header, text=title, font=("Segoe UI", 9, "bold"), bg=bg_color,
+                        fg=text_primary).pack(side=tk.LEFT)
+
+            # Session Stats Section
+            create_section_header(analytics_frame, "Session Stats")
+            session_card = tk.Frame(analytics_frame, bg=card_color)
+            session_card.pack(fill=tk.X, padx=8, pady=2)
+
+            create_stat_row(session_card, "Duration:", "duration")
+            create_stat_row(session_card, "Patients:", "total_patients", "#5cb85c")
+            create_stat_row(session_card, "Success Rate:", "success_rate", "#5cb85c")
+            create_stat_row(session_card, "Avg Time:", "avg_time", "#f0ad4e")
+            create_stat_row(session_card, "Per Hour:", "patients_per_hour", "#9c27b0")
+
+            # Processing Breakdown Section
+            create_section_header(analytics_frame, "Breakdown", "#FF9800")
+            breakdown_card = tk.Frame(analytics_frame, bg=card_color)
+            breakdown_card.pack(fill=tk.X, padx=8, pady=2)
+
+            create_stat_row(breakdown_card, "Successful:", "successful", "#5cb85c")
+            create_stat_row(breakdown_card, "Partial:", "partial", "#f0ad4e")
+            create_stat_row(breakdown_card, "Failed:", "failed", "#d9534f")
+            create_stat_row(breakdown_card, "WR Scans:", "scans", accent_analytics)
+
+            # Value Assessment Section
+            create_section_header(analytics_frame, "Value", "#9c27b0")
+            value_card = tk.Frame(analytics_frame, bg=card_color)
+            value_card.pack(fill=tk.X, padx=8, pady=2)
+
+            create_stat_row(value_card, "Efficiency:", "efficiency", "#5cb85c")
+            create_stat_row(value_card, "Time Saved:", "time_saved", accent_analytics)
+            create_stat_row(value_card, "Weekly Saved:", "weekly_hours", "#9c27b0")
+
+            # Recommendation (compact)
+            rec_frame = tk.Frame(analytics_frame, bg=bg_color)
+            rec_frame.pack(fill=tk.X, padx=8, pady=(5, 3))
+            analytics_labels['recommendation'] = tk.Label(rec_frame, text="Gathering data...",
+                                                          font=("Segoe UI", 8), bg=bg_color,
+                                                          fg=text_secondary, wraplength=440, justify="left")
+            analytics_labels['recommendation'].pack(fill=tk.X)
+
+            # === TAB SWITCHING LOGIC ===
+            def switch_to_patients():
+                current_tab[0] = "patients"
+                analytics_frame.pack_forget()
+                patients_frame.pack(fill=tk.BOTH, expand=True)
+                patients_tab_btn.config(bg=accent_color, fg="#1a1a24", font=("Segoe UI", 10, "bold"))
+                analytics_tab_btn.config(bg=card_color, fg=text_secondary, font=("Segoe UI", 10))
+
+            def switch_to_analytics():
+                current_tab[0] = "analytics"
+                patients_frame.pack_forget()
+                analytics_frame.pack(fill=tk.BOTH, expand=True)
+                analytics_tab_btn.config(bg=accent_analytics, fg="#1a1a24", font=("Segoe UI", 10, "bold"))
+                patients_tab_btn.config(bg=card_color, fg=text_secondary, font=("Segoe UI", 10))
+                # Trigger an analytics update
+                update_analytics_tab()
+
+            patients_tab_btn.bind("<Button-1>", lambda e: switch_to_patients())
+            analytics_tab_btn.bind("<Button-1>", lambda e: switch_to_analytics())
+
+            # Hover effects for tabs
+            def tab_hover_enter(btn, is_active_check):
+                if current_tab[0] != is_active_check:
+                    btn.config(bg="#3a3a4e")
+            def tab_hover_leave(btn, active_color, is_active_check):
+                if current_tab[0] != is_active_check:
+                    btn.config(bg=card_color)
+                else:
+                    btn.config(bg=active_color)
+
+            patients_tab_btn.bind("<Enter>", lambda e: tab_hover_enter(patients_tab_btn, "patients"))
+            patients_tab_btn.bind("<Leave>", lambda e: tab_hover_leave(patients_tab_btn, accent_color, "patients"))
+            analytics_tab_btn.bind("<Enter>", lambda e: tab_hover_enter(analytics_tab_btn, "analytics"))
+            analytics_tab_btn.bind("<Leave>", lambda e: tab_hover_leave(analytics_tab_btn, accent_analytics, "analytics"))
+
+            patient_log_root.mainloop()
+
+        def nav_cycle(direction):
+            """Navigate between cycles."""
+            if not cycle_history:
+                return
+            new_cycle = current_view_cycle[0] + direction
+            if new_cycle >= 1 and new_cycle <= current_cycle_num[0]:
+                current_view_cycle[0] = new_cycle
+                display_cycle(new_cycle)
+
+        def display_cycle(cycle_num):
+            """Display data for a specific cycle."""
+            if patient_log_root and patient_log_text:
+                patient_log_root.after(0, lambda: _do_display_cycle(cycle_num))
+
+        def _do_display_cycle(cycle_num):
+            if patient_log_text and cycle_label:
+                patient_log_text.config(state=tk.NORMAL)
+                patient_log_text.delete(1.0, tk.END)
+                if cycle_num in cycle_history:
+                    for msg in cycle_history[cycle_num]:
+                        patient_log_text.insert(tk.END, msg + "\n")
+                patient_log_text.config(state=tk.DISABLED)
+                # Update cycle label
+                is_live = cycle_num == current_cycle_num[0]
+                cycle_label.config(text=f"Cycle {cycle_num}" + (" (LIVE)" if is_live else ""))
+
+        log_thread = threading.Thread(target=create_patient_log_overlay, daemon=True)
+        log_thread.start()
+        time.sleep(0.2)
+
+        def update_patient_log(message, new_cycle=None):
+            """Add message to patient log overlay."""
+            is_new_cycle = new_cycle is not None
+
+            if is_new_cycle:
+                current_cycle_num[0] = new_cycle
+                current_view_cycle[0] = new_cycle
+                cycle_history[new_cycle] = []
+
+            if current_cycle_num[0] > 0:
+                if current_cycle_num[0] not in cycle_history:
+                    cycle_history[current_cycle_num[0]] = []
+                cycle_history[current_cycle_num[0]].append(message)
+
+            # Only update display if viewing current cycle
+            if current_view_cycle[0] == current_cycle_num[0]:
+                if patient_log_text and patient_log_root:
+                    try:
+                        patient_log_root.after(0, lambda: _do_log_update(message, is_new_cycle))
+                    except:
+                        pass
+
+        def _do_log_update(message, clear_first=False):
+            if patient_log_text and cycle_label:
+                patient_log_text.config(state=tk.NORMAL)
+                # Clear display if starting new cycle
+                if clear_first:
+                    patient_log_text.delete(1.0, tk.END)
+                # If this is viewing current cycle, append
+                if current_view_cycle[0] == current_cycle_num[0]:
+                    patient_log_text.insert(tk.END, message + "\n")
+                    patient_log_text.see(tk.END)
+                cycle_label.config(text=f"Cycle {current_cycle_num[0]} (LIVE)")
+                patient_log_text.config(state=tk.DISABLED)
+
+        # Simple analytics data cache (updated in background)
+        analytics_cache = {
+            'duration': '0 min', 'total_patients': '0', 'success_rate': '0%',
+            'avg_time': '0s', 'patients_per_hour': '0', 'successful': '0',
+            'partial': '0', 'failed': '0', 'scans': '0', 'efficiency': '0x',
+            'time_saved': '0s', 'weekly_hours': '0h', 'recommendation': 'Gathering data...'
+        }
+
+        def update_analytics_cache():
+            """Update the analytics cache (called from main thread)."""
+            try:
+                stats = analytics.get_current_stats()
+                if stats:
+                    analytics_cache['duration'] = f"{stats.get('duration_minutes', 0):.1f} min"
+                    analytics_cache['total_patients'] = str(stats.get('total_patients_processed', 0))
+                    analytics_cache['success_rate'] = f"{stats.get('success_rate', 0):.0f}%"
+                    analytics_cache['avg_time'] = f"{stats.get('avg_time_per_patient_seconds', 0):.1f}s"
+                    analytics_cache['patients_per_hour'] = f"{stats.get('patients_per_hour', 0):.1f}"
+                    analytics_cache['successful'] = str(stats.get('successful_extractions', 0))
+                    analytics_cache['partial'] = str(stats.get('partial_extractions', 0))
+                    analytics_cache['failed'] = str(stats.get('failed_extractions', 0))
+                    analytics_cache['scans'] = str(stats.get('waiting_room_scans', 0))
+            except Exception as e:
+                logger.debug(f"Analytics cache update error: {e}")
+
+        def update_analytics_tab():
+            """Update the analytics tab display from cache."""
+            if not patient_log_root or not analytics_labels:
+                return
+            try:
+                def _do_update():
+                    for key, val in analytics_cache.items():
+                        if key in analytics_labels:
+                            analytics_labels[key].config(text=val)
+                patient_log_root.after(0, _do_update)
+            except Exception:
+                pass
+
+        # === ROOMED PATIENTS OVERLAY (Top Right) ===
+        roomed_overlay_root = None
+        roomed_text = None
+        roomed_patients = []
+
+        def create_roomed_overlay():
+            nonlocal roomed_overlay_root, roomed_text
+            while True:
+                try:
+                    roomed_overlay_root = tk.Tk()
+                    roomed_overlay_root.withdraw()
+
+                    roomed_win = tk.Toplevel(roomed_overlay_root)
+                    roomed_win.overrideredirect(True)
+                    roomed_win.attributes('-topmost', True)
+                    roomed_win.attributes('-alpha', 0.9)
+
+                    screen_width = roomed_overlay_root.winfo_screenwidth()
+                    # Start at y=220 to avoid covering Close button at y=185
+                    roomed_win.geometry(f'400x250+{screen_width - 440}+220')
+                    roomed_win.configure(bg='#1a1a24')
+
+                    # Register for global hide/show
+                    register_overlay_window(roomed_win)
+
+                    title_frame = tk.Frame(roomed_win, bg='#252532')
+                    title_frame.pack(fill=tk.X)
+                    tk.Label(title_frame, text='Roomed Patients', font=('Segoe UI', 11, 'bold'),
+                            bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
+
+                    tk.Frame(roomed_win, bg='#FF9800', height=2).pack(fill=tk.X)
+
+                    text_frame = tk.Frame(roomed_win, bg='#1a1a24')
+                    text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+                    roomed_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
+                                          font=('Consolas', 9), wrap=tk.WORD,
+                                          highlightthickness=0, borderwidth=0)
+                    roomed_text.pack(fill=tk.BOTH, expand=True)
+                    roomed_text.insert(tk.END, 'Waiting for patients to be roomed...\n')
+                    roomed_text.config(state=tk.DISABLED)
+
+                    roomed_overlay_root.mainloop()
+                except Exception as e:
+                    print(f"Roomed overlay error: {e}")
+                    time.sleep(0.5)
+                    continue
+                break
+
+        roomed_thread = threading.Thread(target=create_roomed_overlay, daemon=True)
+        roomed_thread.start()
+        time.sleep(0.15)
+
+        def update_roomed(message):
+            if roomed_text and roomed_overlay_root:
+                try:
+                    roomed_overlay_root.after(0, lambda: _do_roomed_update(message))
+                except:
+                    pass
+
+        def _do_roomed_update(message):
+            try:
+                if roomed_text:
+                    roomed_text.config(state=tk.NORMAL)
+                    roomed_text.insert(tk.END, message + "\n")
+                    roomed_text.see(tk.END)
+                    roomed_text.config(state=tk.DISABLED)
+            except:
+                pass
+
+        # === DISCHARGED PATIENTS OVERLAY (Below Roomed - Top Right) ===
+        discharged_overlay_root = None
+        discharged_text = None
+
+        def create_discharged_overlay():
+            nonlocal discharged_overlay_root, discharged_text
+            while True:
+                try:
+                    discharged_overlay_root = tk.Tk()
+                    discharged_overlay_root.withdraw()
+
+                    discharged_win = tk.Toplevel(discharged_overlay_root)
+                    discharged_win.overrideredirect(True)
+                    discharged_win.attributes('-topmost', True)
+                    discharged_win.attributes('-alpha', 0.9)
+
+                    screen_width = discharged_overlay_root.winfo_screenwidth()
+                    # Position below the Roomed Patients overlay (220 + 250 + 10 = 480)
+                    discharged_win.geometry(f'400x200+{screen_width - 440}+480')
+                    discharged_win.configure(bg='#1a1a24')
+
+                    register_overlay_window(discharged_win)
+
+                    title_frame = tk.Frame(discharged_win, bg='#252532')
+                    title_frame.pack(fill=tk.X)
+                    tk.Label(title_frame, text='Discharged Patients', font=('Segoe UI', 11, 'bold'),
+                            bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
+
+                    tk.Frame(discharged_win, bg='#9C27B0', height=2).pack(fill=tk.X)  # Purple accent
+
+                    text_frame = tk.Frame(discharged_win, bg='#1a1a24')
+                    text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+                    discharged_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
+                                              font=('Consolas', 9), wrap=tk.WORD,
+                                              highlightthickness=0, borderwidth=0)
+                    discharged_text.pack(fill=tk.BOTH, expand=True)
+                    discharged_text.insert(tk.END, 'Tracking discharges...\n')
+                    discharged_text.config(state=tk.DISABLED)
+
+                    discharged_overlay_root.mainloop()
+                except Exception as e:
+                    print(f"Discharged overlay error: {e}")
+                    time.sleep(0.5)
+                    continue
+                break
+
+        discharged_thread = threading.Thread(target=create_discharged_overlay, daemon=True)
+        discharged_thread.start()
+        time.sleep(0.15)
+
+        def update_discharged(message):
+            if discharged_text and discharged_overlay_root:
+                try:
+                    discharged_overlay_root.after(0, lambda: _do_discharged_update(message))
+                except:
+                    pass
+
+        def _do_discharged_update(message):
+            try:
+                if discharged_text:
+                    discharged_text.config(state=tk.NORMAL)
+                    discharged_text.insert(tk.END, message + "\n")
+                    discharged_text.see(tk.END)
+                    discharged_text.config(state=tk.DISABLED)
+            except:
+                pass
+
+        # === EXTRACTED PATIENT DATA OVERLAY (Top Left) ===
+        extracted_data_root = None
+        extracted_data_text = None
+        extracted_patients_list = []  # Store all extracted patient data
+
+        def create_extracted_data_overlay():
+            nonlocal extracted_data_root, extracted_data_text
+            extracted_data_root = tk.Tk()
+            extracted_data_root.withdraw()
+
+            data_win = tk.Toplevel(extracted_data_root)
+            data_win.overrideredirect(True)
+            data_win.attributes('-topmost', True)
+            data_win.attributes('-alpha', 0.9)
+
+            # Position in TOP LEFT corner
+            data_win.geometry('450x400+40+40')
+            data_win.configure(bg='#1a1a24')
+
+            title_frame = tk.Frame(data_win, bg='#252532')
+            title_frame.pack(fill=tk.X)
+            tk.Label(title_frame, text='Extracted Patient Data', font=('Segoe UI', 11, 'bold'),
+                    bg='#252532', fg='#f0f0f0').pack(side=tk.LEFT, padx=10, pady=8)
+
+            # Patient count
+            count_label = tk.Label(title_frame, text='0 patients', font=('Segoe UI', 9),
+                                  bg='#252532', fg='#5cb85c')
+            count_label.pack(side=tk.RIGHT, padx=10, pady=8)
+
+            tk.Frame(data_win, bg='#2196F3', height=2).pack(fill=tk.X)  # Blue accent
+
+            text_frame = tk.Frame(data_win, bg='#1a1a24')
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            extracted_data_text = tk.Text(text_frame, bg='#252532', fg='#f0f0f0',
+                                          font=('Consolas', 9), wrap=tk.WORD,
+                                          highlightthickness=0, borderwidth=0)
+            extracted_data_text.pack(fill=tk.BOTH, expand=True)
+            extracted_data_text.insert(tk.END, 'Waiting for qualified patients...\n')
+            extracted_data_text.config(state=tk.DISABLED)
+
+            # Store count label for updates
+            data_win.count_label = count_label
+
+            register_overlay_window(data_win)
+
+            extracted_data_root.mainloop()
+
+        extracted_data_thread = threading.Thread(target=create_extracted_data_overlay, daemon=True)
+        extracted_data_thread.start()
+        time.sleep(0.15)
+
+        def update_extracted_data(patient_data):
+            """Add a new patient's extracted data to the overlay."""
+            if extracted_data_text and extracted_data_root:
+                extracted_patients_list.append(patient_data)
+                try:
+                    extracted_data_root.after(0, lambda: _do_extracted_update(patient_data))
+                except:
+                    pass
+
+        def _do_extracted_update(patient_data):
+            if extracted_data_text:
+                extracted_data_text.config(state=tk.NORMAL)
+
+                # Format patient data nicely
+                name = patient_data.get('name', 'Unknown')
+                first = patient_data.get('first_name', '')
+                last = patient_data.get('last_name', '')
+                dob = patient_data.get('dob', 'N/A')
+                mrn = patient_data.get('mrn', 'N/A')
+                phone = patient_data.get('cell_phone', 'N/A')
+                email = patient_data.get('email', 'N/A')
+                gender = patient_data.get('gender', 'N/A')
+                insurance = patient_data.get('insurance', 'N/A')
+                race = patient_data.get('race', 'N/A')
+                ethnicity = patient_data.get('ethnicity', 'N/A')
+                language = patient_data.get('language', 'N/A')
+                pharmacy = patient_data.get('pharmacy', 'N/A')
+
+                # Clear on first entry
+                if len(extracted_patients_list) == 1:
+                    extracted_data_text.delete(1.0, tk.END)
+
+                # Add separator between patients
+                if len(extracted_patients_list) > 1:
+                    extracted_data_text.insert(tk.END, "-" * 40 + "\n")
+
+                # Display formatted data
+                extracted_data_text.insert(tk.END, f"Name: {last}, {first}\n")
+                extracted_data_text.insert(tk.END, f"DOB: {dob}\n")
+                extracted_data_text.insert(tk.END, f"MRN: {mrn}\n")
+                extracted_data_text.insert(tk.END, f"Phone: {phone}\n")
+                extracted_data_text.insert(tk.END, f"Email: {email}\n")
+                extracted_data_text.insert(tk.END, f"Gender: {gender}\n")
+                extracted_data_text.insert(tk.END, f"Insurance: {insurance}\n")
+                extracted_data_text.insert(tk.END, f"Race: {race}\n")
+                extracted_data_text.insert(tk.END, f"Ethnicity: {ethnicity}\n")
+                extracted_data_text.insert(tk.END, f"Language: {language}\n")
+                extracted_data_text.insert(tk.END, f"Pharmacy: {pharmacy}\n")
+
+                extracted_data_text.see(tk.END)
+                extracted_data_text.config(state=tk.DISABLED)
+
+        # Previous patient tracking for roomed detection
+        previous_patients = {}
+
+        # === WAITING ROOM HEADER OVERLAY ===
+        wr_overlay_root = None
+
+        def create_wr_overlay():
+            nonlocal wr_overlay_root
+            wr_overlay_root = tk.Tk()
+            wr_overlay_root.withdraw()
+
+            overlay = tk.Toplevel(wr_overlay_root)
+            overlay.overrideredirect(True)
+            overlay.attributes('-topmost', True)
+            overlay.attributes('-alpha', 0.5)
+            overlay.geometry(f"{WR_WIDTH}x{WR_HEIGHT}+{WR_X}+{WR_Y}")
+
+            frame = tk.Frame(overlay, bg='#00FF00', highlightthickness=3, highlightbackground='#00FF00')
+            frame.pack(fill=tk.BOTH, expand=True)
+            inner = tk.Frame(frame, bg='black')
+            inner.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+            try:
+                overlay.attributes('-transparentcolor', 'black')
+            except:
+                pass
+
+            label_win = tk.Toplevel(wr_overlay_root)
+            label_win.overrideredirect(True)
+            label_win.attributes('-topmost', True)
+            tk.Label(label_win, text="MONITORING", font=("Segoe UI", 9, "bold"),
+                    bg='#00AA00', fg='white', padx=6, pady=3).pack()
+            label_win.geometry(f"+{WR_X + WR_WIDTH + 5}+{WR_Y}")
+
+            register_overlay_window(overlay)
+            register_overlay_window(label_win)
+
+            wr_overlay_root.mainloop()
+
+        wr_thread = threading.Thread(target=create_wr_overlay, daemon=True)
+        wr_thread.start()
+        time.sleep(0.15)
+
+        control.add_log("Overlays active")
+        update_patient_log("=== MONITORING ACTIVE ===")
+
+        # === ANALYTICS INITIALIZATION ===
+        analytics = get_analytics()
+        analytics.start_session()
+        control.add_log(f"Analytics session started: {analytics.current_session.session_id}")
+
+        # Callback to update analytics UI
+        def update_analytics_display(stats):
+            control.add_log(f"Analytics callback! Patients: {stats.get('total_patients_processed', 0) if stats else 0}")
+            try:
+                update_analytics_cache()
+                update_analytics_tab()
+            except Exception as e:
+                control.add_log(f"Analytics callback err: {e}")
+
+        analytics.set_stats_callback(update_analytics_display)
+
+        # === PATIENT ROW OVERLAY FUNCTIONS ===
+        # Single shared root for all patient overlays (created in main thread context)
+        patient_overlay_root = None
+        patient_overlay_toplevels = []  # Store just the Toplevel windows
+
+        def init_patient_overlay_root():
+            """Initialize the shared root for patient overlays."""
+            nonlocal patient_overlay_root
+            patient_overlay_root = tk.Tk()
+            patient_overlay_root.withdraw()
+            patient_overlay_root.mainloop()
+
+        # Start the overlay root in background thread
+        overlay_root_thread = threading.Thread(target=init_patient_overlay_root, daemon=True)
+        overlay_root_thread.start()
+        time.sleep(0.15)
+
+        def create_patient_row_overlay(rect, name, color="#00FF00"):
+            """Create overlay border around a patient row. Returns list of Toplevel windows."""
+            toplevels = []
+
+            # Use actual rect dimensions from DataItem
+            row_x = rect.left
+            row_y = rect.top
+            row_width = rect.right - rect.left
+            row_height = rect.bottom - rect.top
+            border_width = 3
+
+            def create_borders():
+                nonlocal toplevels
+                # Top border
+                top = tk.Toplevel(patient_overlay_root)
+                top.overrideredirect(True)
+                top.attributes('-topmost', True)
+                top.attributes('-alpha', 0.8)
+                top.geometry(f"{row_width}x{border_width}+{row_x}+{row_y}")
+                top.configure(bg=color)
+                toplevels.append(top)
+                register_overlay_window(top)
+
+                # Bottom border
+                bottom = tk.Toplevel(patient_overlay_root)
+                bottom.overrideredirect(True)
+                bottom.attributes('-topmost', True)
+                bottom.attributes('-alpha', 0.8)
+                bottom.geometry(f"{row_width}x{border_width}+{row_x}+{row_y + row_height - border_width}")
+                bottom.configure(bg=color)
+                toplevels.append(bottom)
+                register_overlay_window(bottom)
+
+                # Left border
+                left = tk.Toplevel(patient_overlay_root)
+                left.overrideredirect(True)
+                left.attributes('-topmost', True)
+                left.attributes('-alpha', 0.8)
+                left.geometry(f"{border_width}x{row_height}+{row_x}+{row_y}")
+                left.configure(bg=color)
+                toplevels.append(left)
+                register_overlay_window(left)
+
+                # Right border
+                right = tk.Toplevel(patient_overlay_root)
+                right.overrideredirect(True)
+                right.attributes('-topmost', True)
+                right.attributes('-alpha', 0.8)
+                right.geometry(f"{border_width}x{row_height}+{row_x + row_width - border_width}+{row_y}")
+                right.configure(bg=color)
+                toplevels.append(right)
+                register_overlay_window(right)
+
+            # Schedule creation in the overlay root's thread
+            if patient_overlay_root:
+                patient_overlay_root.after(0, create_borders)
+                time.sleep(0.05)  # Give time for creation
+
+            return toplevels
+
+        def clear_patient_overlays():
+            """Clear patient row overlays (red/blue borders)."""
+            nonlocal patient_overlay_toplevels
+
+            def do_clear():
+                for tl in patient_overlay_toplevels:
+                    try:
+                        unregister_overlay_window(tl)
+                        tl.destroy()
+                    except:
+                        pass
+
+            if patient_overlay_root:
+                patient_overlay_root.after(0, do_clear)
+                time.sleep(0.1)  # Give time for overlays to clear
+
+            patient_overlay_toplevels = []
+
+        def lift_info_overlays():
+            """Bring info overlays (patient log, roomed, discharged) to top of z-order."""
+            def do_lift(root):
+                if root:
+                    try:
+                        for child in root.winfo_children():
+                            try:
+                                child.lift()
+                                child.attributes('-topmost', True)
+                            except:
+                                pass
+                    except:
+                        pass
+
+            # Lift all info overlays above patient row overlays
+            for root in [patient_log_root, roomed_overlay_root, discharged_overlay_root, extracted_data_root]:
+                if root:
+                    try:
+                        root.after(0, lambda r=root: do_lift(r))
+                    except:
+                        pass
+
+        def show_patient_overlays(patients):
+            """Show overlay borders around patient rows with qualification colors.
+            Colors: GREEN = extracted, BLUE = qualified (not yet extracted), RED = not qualified
+            """
+            nonlocal patient_overlay_toplevels
+
+            # Create new overlays for each patient
+            for p in patients:
+                rect = p.get('rect')
+                name = p.get('name', 'Patient')
+                if rect:
+                    # Check qualification
+                    qualified, reason = check_qualification(p)
+                    p['qualified'] = qualified
+                    p['reason'] = reason
+
+                    # Determine color based on status
+                    patient_status = p.get('status', '').upper()
+                    patient_notes = p.get('notes', '').strip()
+
+                    if name in processed_patients:
+                        color = "#4CAF50"  # GREEN - already extracted
+                        p['extracted'] = True
+                    elif 'LOGGING' in patient_status:
+                        # LOGGING status means patient is still being logged in - skip
+                        color = "#FF9800"  # ORANGE - still logging in, wait
+                        p['extracted'] = False
+                        p['qualified'] = False  # Mark as not qualified until logged
+                        p['reason'] = "Logging - waiting to complete"
+                    elif 'LOGPENDING' in patient_status:
+                        # LOGPENDING status means patient registration is pending - skip
+                        color = "#FF9800"  # ORANGE - log pending, wait for completion
+                        p['extracted'] = False
+                        p['qualified'] = False  # Mark as not qualified until status changes
+                        p['reason'] = "LogPending - waiting for status update"
+                    elif 'CHARTING' in patient_status and not patient_notes:
+                        # Charting but no notes yet - highlight orange, skip for now
+                        color = "#FF9800"  # ORANGE - charting with no notes, wait
+                        p['extracted'] = False
+                        p['qualified'] = False  # Mark as not qualified until notes added
+                        p['reason'] = "Charting - waiting for notes"
+                    elif qualified:
+                        # LOGGED status patients with notes are eligible if they qualify
+                        color = "#2196F3"  # BLUE - qualified, not yet extracted
+                        p['extracted'] = False
+                    else:
+                        color = "#F44336"  # RED - not qualified
+                        p['extracted'] = False
+
+                    # Create overlay and track the toplevels
+                    new_toplevels = create_patient_row_overlay(rect, name, color)
+                    patient_overlay_toplevels.extend(new_toplevels)
+
+            # Lift info overlays above patient row overlays
+            lift_info_overlays()
 
     def find_patient_rows():
         """Find patient data rows in the Waiting Room with full details."""
@@ -1617,6 +1906,8 @@ def _start_monitoring(control, outbound_worker=None):
                             if value:
                                 if col_num == 6:  # Patient name
                                     row_data['name'] = value
+                                    # Store name element rect for clicking (like find_patient_rows)
+                                    row_data['name_rect'] = child.rectangle()
                                 elif col_num == 1:  # Room
                                     row_data['room'] = value
                                 elif col_num == 10:  # Age
@@ -1629,6 +1920,14 @@ def _start_monitoring(control, outbound_worker=None):
                                     row_data['time'] = value
                     except:
                         pass
+
+                # Store chart icon rect from Image elements in the row
+                try:
+                    images = di.descendants(control_type='Image')
+                    if images:
+                        row_data['chart_icon_rect'] = images[0].rectangle()
+                except:
+                    pass
 
                 # Only add if we found a patient name
                 if 'name' in row_data and row_data['name']:
@@ -1673,10 +1972,6 @@ def _start_monitoring(control, outbound_worker=None):
     # Track patients we've already processed to avoid re-clicking
     processed_patients = set()
 
-    # Close button coordinates on Demographics screen
-    CLOSE_BTN_X = 2199
-    CLOSE_BTN_Y = 1496
-
     def click_qualified_patient(patient):
         """
         Extract patient demographics via Demographics popup + chart.
@@ -1712,34 +2007,17 @@ def _start_monitoring(control, outbound_worker=None):
 
             if not demo_win:
                 control.add_log(f"Demographics window didn't open for {name}")
-                pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+                close_demographics_window(demo_win) if demo_win else None
                 return patient_data
 
             control.set_step("Extracting...")
 
-            # BATCH EXTRACT: Get all elements at once
-            edits = demo_win.descendants(control_type='Edit')
+            # BATCH EXTRACT: Get all elements at once using label-based detection
+            demo_fields = extract_demographics_fields(demo_win)
+            patient_data.update(demo_fields)
+
             texts = demo_win.descendants(control_type='Text')
             radios = demo_win.descendants(control_type='RadioButton')
-
-            for edit in edits[:30]:
-                try:
-                    txt = edit.window_text()
-                    if not txt:
-                        continue
-                    rect = edit.rectangle()
-                    if 330 < rect.top < 345 and rect.left < 600:
-                        patient_data['first_name'] = txt
-                    elif 368 < rect.top < 385 and rect.left < 600:
-                        patient_data['last_name'] = txt
-                    elif 565 < rect.top < 580 and rect.left < 600:
-                        patient_data['dob'] = txt
-                    elif 330 < rect.top < 350 and 1100 < rect.left < 1500:
-                        patient_data['cell_phone'] = txt
-                    elif 640 < rect.top < 660 and 1100 < rect.left < 1500:
-                        patient_data['email'] = txt
-                except:
-                    pass
 
             for txt_elem in texts[:30]:
                 try:
@@ -1767,75 +2045,55 @@ def _start_monitoring(control, outbound_worker=None):
             except:
                 pass
 
-            skip_values = ['Race:', 'Race', 'Ethnicity:', 'Ethnicity', 'Language:', 'Language', 'Employer', 'Name:', 'Phone:', 'Ext:', 'Cultural Information']
-            found_race = found_eth = found_lang = False
-            for txt_elem in texts[:100]:
-                try:
-                    txt = txt_elem.window_text()
-                    if not txt:
-                        continue
-                    if 'Race:' in txt or txt == 'Race':
-                        found_race = True
-                    elif found_race and txt.strip() and txt.strip() not in skip_values:
-                        patient_data['race'] = txt.strip()
-                        found_race = False
-                    if 'Ethnicity:' in txt or txt == 'Ethnicity':
-                        found_eth = True
-                    elif found_eth and txt.strip() and txt.strip() not in skip_values:
-                        patient_data['ethnicity'] = txt.strip()
-                        found_eth = False
-                    if 'Language:' in txt or txt == 'Language':
-                        found_lang = True
-                    elif found_lang and txt.strip() and txt.strip() not in skip_values:
-                        patient_data['language'] = txt.strip()
-                        found_lang = False
-                except:
-                    pass
+            # NOTE: Race/Ethnicity/Language are ONLY extracted from the chart Demographics tab,
+            # not from this popup — the popup layout causes false matches.
 
             extracted = [f"{k}={v}" for k, v in patient_data.items() if k not in ['name', 'clicked']]
             control.add_log(f"Extracted: {', '.join(extracted)}")
 
             # Close demographics and WAIT for it to disappear (no fixed sleep)
-            pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+            close_demographics_window(demo_win)
             wait_for_window_close('.*Demographics.*', timeout=3)
 
         except Exception as e:
             control.add_log(f"Demographics error: {str(e)[:30]}")
-            pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+            if demo_win:
+                close_demographics_window(demo_win)
             wait_for_window_close('.*Demographics.*', timeout=2)
 
-        # === INSURANCE EXTRACTION - USE STORED DATA_ITEM (NO RE-SEARCH) ===
+        # === INSURANCE EXTRACTION - RE-SCAN TO FIND CHART ICON ===
         control.set_step("Opening chart...")
 
         try:
-            # Get chart icon directly from stored data_item reference
+            # Always re-scan the Waiting Room to find the patient's row fresh
+            # (stored data_item refs go stale after Demographics popup closes)
             chart_icon = None
-            if data_item:
+            try:
+                wr_group = win.child_window(title_re='.*Waiting Room.*', control_type='Group')
+                data_items = wr_group.descendants(control_type='DataItem')
+                patient_name = name.upper()
+                for di in data_items:
+                    try:
+                        di_text = di.window_text()
+                        if patient_name in di_text.upper():
+                            images_in_row = di.descendants(control_type='Image')
+                            if images_in_row:
+                                chart_icon = images_in_row[0]
+                            control.add_log(f"Re-scanned: found {name} row")
+                            break
+                    except:
+                        continue
+            except:
+                control.add_log("Re-scan failed, trying stored ref")
+
+            # Last resort: try stored data_item reference
+            if not chart_icon and data_item:
                 try:
                     images_in_row = data_item.descendants(control_type='Image')
                     if images_in_row:
                         chart_icon = images_in_row[0]
                 except:
-                    control.add_log("Stored data_item stale, falling back")
-
-            # Fallback: quick search if stored ref failed
-            if not chart_icon:
-                try:
-                    wr_group = win.child_window(title_re='.*Waiting Room.*', control_type='Group')
-                    data_items = wr_group.descendants(control_type='DataItem')
-                    patient_name = name.upper()
-                    for di in data_items:
-                        try:
-                            di_text = di.window_text()
-                            if patient_name in di_text.upper():
-                                images_in_row = di.descendants(control_type='Image')
-                                if images_in_row:
-                                    chart_icon = images_in_row[0]
-                                break
-                        except:
-                            continue
-                except:
-                    pass
+                    control.add_log("Stored data_item also stale")
 
             if chart_icon:
                 chart_rect = chart_icon.rectangle()
@@ -1858,15 +2116,38 @@ def _start_monitoring(control, outbound_worker=None):
                     control.add_log("Chart didn't open - skipping insurance")
                     raise Exception("Chart failed to open")
 
-                # Click Demographics tab and wait for content to load
-                pyautogui.click(2462, 472)
+                # Wait for Demographics tab to actually exist before clicking
+                demo_tab_clicked = False
+                demo_deadline = time.time() + 10  # 10 second timeout
+                while time.time() < demo_deadline:
+                    try:
+                        tab_items = chart_win.descendants(control_type='TabItem')
+                        for elem in tab_items:
+                            tab_name = elem.element_info.name or ''
+                            if 'demograph' in tab_name.lower():
+                                # Verify the element is visible and has a valid rect
+                                rect = elem.rectangle()
+                                if rect.right > rect.left and rect.bottom > rect.top:
+                                    pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                                    demo_tab_clicked = True
+                                    control.add_log("Demographics tab found and clicked")
+                                    break
+                    except Exception:
+                        pass
+                    if demo_tab_clicked:
+                        break
+                    time.sleep(0.2)
+                if not demo_tab_clicked:
+                    control.add_log("Demographics tab never appeared after 10s - skipping insurance")
+                    raise Exception("Demographics tab not found")
+
                 # Wait for tab content by checking for text elements to appear
                 deadline = time.time() + 3
                 texts = []
                 while time.time() < deadline:
                     try:
                         texts = chart_win.descendants(control_type='Text')
-                        if len(texts) > 10:  # Demographics tab has many text elements
+                        if len(texts) > 10:
                             break
                     except:
                         pass
@@ -1907,41 +2188,43 @@ def _start_monitoring(control, outbound_worker=None):
                             except:
                                 pass
 
-                    # Race/Ethnicity/Language from chart (if not already found in popup)
-                    skip_values = ['Race:', 'Race', 'Ethnicity:', 'Ethnicity', 'Language:', 'Language', 'Employer', 'Name:', 'Phone:', 'Ext:', 'Cultural Information']
-                    found_race = found_eth = found_lang = False
-                    for t in texts[:150]:
+                    # Race/Ethnicity/Language from chart Cultural Information section
+                    # Position-based: find label, then value at same y to its right
+                    # Only match elements under the "Cultural Information" header
+                    chart_texts_pos = []
+                    cultural_info_y = None
+                    for t in chart_win.descendants(control_type='Text'):
                         try:
                             txt = t.window_text()
-                            if not txt:
-                                continue
-                            if 'race' not in patient_data:
-                                if 'Race:' in txt or txt == 'Race':
-                                    found_race = True
-                                elif found_race and txt.strip() and txt.strip() not in skip_values:
-                                    patient_data['race'] = txt.strip()
-                                    found_race = False
-                            if 'ethnicity' not in patient_data:
-                                if 'Ethnicity:' in txt or txt == 'Ethnicity':
-                                    found_eth = True
-                                elif found_eth and txt.strip() and txt.strip() not in skip_values:
-                                    patient_data['ethnicity'] = txt.strip()
-                                    found_eth = False
-                            if 'language' not in patient_data:
-                                if 'Language:' in txt or txt == 'Language':
-                                    found_lang = True
-                                elif found_lang and txt.strip() and txt.strip() not in skip_values:
-                                    patient_data['language'] = txt.strip()
-                                    found_lang = False
+                            if txt and txt.strip():
+                                rect = t.rectangle()
+                                entry = {'txt': txt.strip(), 'x': rect.left, 'y': rect.top}
+                                chart_texts_pos.append(entry)
+                                if txt.strip() == 'Cultural Information':
+                                    cultural_info_y = rect.top
                         except:
                             pass
+
+                    if cultural_info_y is not None:
+                        # Only look at elements below "Cultural Information" header
+                        cultural_texts = [e for e in chart_texts_pos if e['y'] > cultural_info_y and e['y'] < cultural_info_y + 150]
+                        for label_key, data_key in [('Race:', 'race'), ('Ethnicity:', 'ethnicity'), ('Language:', 'language')]:
+                            for tp in cultural_texts:
+                                if tp['txt'] == label_key:
+                                    ly, lx = tp['y'], tp['x']
+                                    for vp in cultural_texts:
+                                        if abs(vp['y'] - ly) < 20 and vp['x'] > lx + 30 and vp['txt'] != label_key:
+                                            patient_data[data_key] = vp['txt']
+                                            control.add_log(f"Chart {data_key}: {vp['txt']}")
+                                            break
+                                    break
+                    else:
+                        control.add_log("Cultural Information section not found in chart")
                 except Exception as ins_err:
                     control.add_log(f"Insurance extraction error: {str(ins_err)[:30]}")
 
                 # Close sidebar then chart, WAIT for chart to disappear
-                pyautogui.click(2432, 185)
-                time.sleep(0.1)  # tiny gap between clicks
-                pyautogui.click(1782, 1203)
+                close_chart_window(chart_win)
                 wait_for_window_close(chart_title_re, timeout=3)
                 control.add_log("Chart closed")
 
@@ -1951,9 +2234,8 @@ def _start_monitoring(control, outbound_worker=None):
         except Exception as chart_err:
             control.add_log(f"Chart error: {str(chart_err)[:30]}")
             try:
-                pyautogui.click(2432, 185)
-                time.sleep(0.1)
-                pyautogui.click(1782, 1203)
+                if chart_win:
+                    close_chart_window(chart_win)
             except:
                 pass
 
@@ -1972,6 +2254,7 @@ def _start_monitoring(control, outbound_worker=None):
     def process_one_qualified_patient(patient):
         """Process a single qualified patient and return extracted data."""
         name = patient.get('name', 'Unknown')
+        _extract_start = time.time()
 
         # Start analytics
         try:
@@ -1983,6 +2266,8 @@ def _start_monitoring(control, outbound_worker=None):
         data = click_qualified_patient(patient)
 
         if data:
+            # Record extraction duration
+            data['_extract_seconds'] = round(time.time() - _extract_start, 1)
             processed_patients.add(name)
             update_patient_log(f"  >> Extracted data for {name}")
             update_extracted_data(data)
@@ -2040,12 +2325,18 @@ def _start_monitoring(control, outbound_worker=None):
         try:
             # Check if we have rect data from find_roomed_patients
             row_rect = roomed_patient.get('rect')
+            name_rect = roomed_patient.get('name_rect')
 
-            if row_rect:
-                # Use the provided rect directly - much faster and more reliable
+            if name_rect:
+                # Use the name_rect directly - most accurate for clicking the name
+                cx = (name_rect.left + name_rect.right) // 2
+                cy = (name_rect.top + name_rect.bottom) // 2
+                control.add_log(f"Using name_rect for {name}, clicking at ({cx}, {cy})")
+            elif row_rect:
+                # Use the row rect center as fallback
+                cx = (row_rect.left + row_rect.right) // 2
                 cy = (row_rect.top + row_rect.bottom) // 2
-                cx = 1069  # Name column x-coordinate for roomed patients
-                control.add_log(f"Using provided rect for {name}, clicking at ({cx}, {cy})")
+                control.add_log(f"Using row_rect for {name}, clicking at ({cx}, {cy})")
             else:
                 # Fallback: Find the Roomed Patients group and search for patient
                 control.add_log(f"No rect provided, searching for {name} in Roomed Patients...")
@@ -2053,7 +2344,7 @@ def _start_monitoring(control, outbound_worker=None):
                 roomed_data_items = roomed_group.descendants(control_type='DataItem')
 
                 patient_name = name.upper()
-                name_rect = None
+                found_rect = None
 
                 # Find the patient row
                 for di in roomed_data_items:
@@ -2065,22 +2356,24 @@ def _start_monitoring(control, outbound_worker=None):
                             child_text = child.window_text()
                             if child_text and patient_name in child_text.upper():
                                 found_name = True
+                                found_rect = child.rectangle()
                                 break
 
                         if found_name:
-                            name_rect = di.rectangle()
+                            if not found_rect:
+                                found_rect = di.rectangle()
                             control.add_log(f"Found {name} in Roomed section")
                             break
 
                     except Exception as row_err:
                         continue
 
-                if not name_rect:
+                if not found_rect:
                     control.add_log(f"Could not find {name} in Roomed Patients section")
                     return None
 
-                cy = (name_rect.top + name_rect.bottom) // 2
-                cx = 1069  # Name column x-coordinate for roomed patients
+                cx = (found_rect.left + found_rect.right) // 2
+                cy = (found_rect.top + found_rect.bottom) // 2
 
             control.add_log(f"Clicking roomed patient {name} at ({cx}, {cy})")
             pyautogui.click(cx, cy)
@@ -2100,43 +2393,15 @@ def _start_monitoring(control, outbound_worker=None):
                 demo_win = demo_win_roomed
                 if not demo_win:
                     control.add_log("ERROR: Could not find Demographics window!")
-                    pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
                     return None
 
                 control.add_log(f"Connected to Demographics for roomed patient")
 
-                # Get all Edit fields
-                edits = demo_win.descendants(control_type='Edit')
-
-                for edit in edits[:30]:
-                    try:
-                        txt = edit.window_text()
-                        if not txt:
-                            continue
-                        rect = edit.rectangle()
-
-                        # First Name
-                        if 330 < rect.top < 345 and rect.left < 600:
-                            patient_data['first_name'] = txt
-                            control.add_log(f"First Name: {txt}")
-                        # Last Name
-                        elif 368 < rect.top < 385 and rect.left < 600:
-                            patient_data['last_name'] = txt
-                            control.add_log(f"Last Name: {txt}")
-                        # DOB
-                        elif 565 < rect.top < 580 and rect.left < 600:
-                            patient_data['dob'] = txt
-                            control.add_log(f"DOB: {txt}")
-                        # Cell Phone
-                        elif 330 < rect.top < 350 and 1100 < rect.left < 1500:
-                            patient_data['cell_phone'] = txt
-                            control.add_log(f"Cell Phone: {txt}")
-                        # Email
-                        elif 640 < rect.top < 660 and 1100 < rect.left < 1500:
-                            patient_data['email'] = txt
-                            control.add_log(f"Email: {txt}")
-                    except:
-                        pass
+                # Extract demographics fields using label-based detection
+                demo_fields = extract_demographics_fields(demo_win)
+                patient_data.update(demo_fields)
+                for k, v in demo_fields.items():
+                    control.add_log(f"{k}: {v}")
 
                 # Get MRN
                 texts = demo_win.descendants(control_type='Text')
@@ -2176,20 +2441,52 @@ def _start_monitoring(control, outbound_worker=None):
                 # (Demographics tab), not from this Demographics popup. We just get basic info here.
 
                 # Close Demographics and wait for it to disappear
-                pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+                close_demographics_window(demo_win)
                 wait_for_window_close(f'.*{re.escape(name_part)}.*', timeout=2)
                 control.add_log("Closed demographics")
 
             except Exception as demo_err:
                 control.add_log(f"Demographics error: {str(demo_err)[:30]}")
-                pyautogui.click(CLOSE_BTN_X, CLOSE_BTN_Y)
+                if demo_win:
+                    close_demographics_window(demo_win)
                 wait_for_window_close(f'.*{re.escape(name_part)}.*', timeout=2)
 
             # Click chart icon and WAIT for chart window (no fixed sleep)
             control.set_step("Opening chart...")
             try:
-                chart_cx = 978
-                chart_cy = cy
+                chart_icon_rect = roomed_patient.get('chart_icon_rect')
+                if chart_icon_rect:
+                    chart_cx = (chart_icon_rect.left + chart_icon_rect.right) // 2
+                    chart_cy = (chart_icon_rect.top + chart_icon_rect.bottom) // 2
+                else:
+                    # Fallback: re-scan for chart icon Image element in the row
+                    chart_cx, chart_cy = None, None
+                    try:
+                        roomed_group = tb_win.child_window(title_re='.*Roomed Patients.*', control_type='Group')
+                        data_items = roomed_group.descendants(control_type='DataItem')
+                        patient_name_upper = name.upper()
+                        for di in data_items:
+                            try:
+                                di_text = di.window_text()
+                                if patient_name_upper in di_text.upper():
+                                    images = di.descendants(control_type='Image')
+                                    if images:
+                                        img_rect = images[0].rectangle()
+                                        chart_cx = (img_rect.left + img_rect.right) // 2
+                                        chart_cy = (img_rect.top + img_rect.bottom) // 2
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+                    # Last resort: use row rect left edge (chart icon is typically left of name)
+                    if chart_cx is None and row_rect:
+                        chart_cx = row_rect.left + 20
+                        chart_cy = cy
+                    elif chart_cx is None:
+                        control.add_log("Could not determine chart icon position")
+                        raise Exception("No chart icon position available")
+
                 pyautogui.click(chart_cx, chart_cy)
                 control.add_log(f"Clicked chart icon at ({chart_cx}, {chart_cy})")
 
@@ -2203,8 +2500,31 @@ def _start_monitoring(control, outbound_worker=None):
                     control.add_log("Chart didn't open")
                     raise Exception("Chart failed to open")
 
-                # Click Demographics tab and wait for content
-                pyautogui.click(2462, 472)
+                # Wait for Demographics tab to actually exist before clicking
+                _roomed_tab_clicked = False
+                _roomed_deadline = time.time() + 10  # 10 second timeout
+                while time.time() < _roomed_deadline:
+                    try:
+                        tab_items = chart_win.descendants(control_type='TabItem')
+                        for elem in tab_items:
+                            tab_name = elem.element_info.name or ''
+                            if 'demograph' in tab_name.lower():
+                                # Verify the element is visible and has a valid rect
+                                rect = elem.rectangle()
+                                if rect.right > rect.left and rect.bottom > rect.top:
+                                    pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                                    _roomed_tab_clicked = True
+                                    control.add_log("Demographics tab found and clicked")
+                                    break
+                    except Exception:
+                        pass
+                    if _roomed_tab_clicked:
+                        break
+                    time.sleep(0.2)
+                if not _roomed_tab_clicked:
+                    control.add_log("Demographics tab never appeared after 10s - skipping insurance")
+                    raise Exception("Demographics tab not found")
+
                 deadline = time.time() + 3
                 texts_with_pos = []
                 while time.time() < deadline:
@@ -2226,38 +2546,27 @@ def _start_monitoring(control, outbound_worker=None):
 
                 control.add_log(f"Chart has {len(texts_with_pos)} text elements")
 
-                # Extract Race
+                # Extract Race/Ethnicity/Language from Cultural Information section only
+                cultural_y = None
                 for t in texts_with_pos:
-                    if t['txt'] == 'Race:':
-                        ry, rx = t['y'], t['x']
-                        for v in texts_with_pos:
-                            if abs(v['y'] - ry) < 20 and v['x'] > rx + 50:
-                                patient_data['race'] = v['txt']
-                                control.add_log(f"Race: {v['txt']}")
-                                break
+                    if t['txt'] == 'Cultural Information':
+                        cultural_y = t['y']
                         break
 
-                # Extract Ethnicity
-                for t in texts_with_pos:
-                    if t['txt'] == 'Ethnicity:':
-                        ey, ex = t['y'], t['x']
-                        for v in texts_with_pos:
-                            if abs(v['y'] - ey) < 20 and v['x'] > ex + 50:
-                                patient_data['ethnicity'] = v['txt']
-                                control.add_log(f"Ethnicity: {v['txt']}")
+                if cultural_y is not None:
+                    cultural_texts = [e for e in texts_with_pos if e['y'] > cultural_y and e['y'] < cultural_y + 150]
+                    for label_key, data_key in [('Race:', 'race'), ('Ethnicity:', 'ethnicity'), ('Language:', 'language')]:
+                        for tp in cultural_texts:
+                            if tp['txt'] == label_key:
+                                ly, lx = tp['y'], tp['x']
+                                for vp in cultural_texts:
+                                    if abs(vp['y'] - ly) < 20 and vp['x'] > lx + 30 and vp['txt'] != label_key:
+                                        patient_data[data_key] = vp['txt']
+                                        control.add_log(f"{data_key}: {vp['txt']}")
+                                        break
                                 break
-                        break
-
-                # Extract Language
-                for t in texts_with_pos:
-                    if t['txt'] == 'Language:':
-                        ly, lx = t['y'], t['x']
-                        for v in texts_with_pos:
-                            if abs(v['y'] - ly) < 20 and v['x'] > lx + 50:
-                                patient_data['language'] = v['txt']
-                                control.add_log(f"Language: {v['txt']}")
-                                break
-                        break
+                else:
+                    control.add_log("Cultural Information section not found")
 
                 # Extract Primary Insurance
                 for t in texts_with_pos:
@@ -2271,9 +2580,7 @@ def _start_monitoring(control, outbound_worker=None):
                         break
 
                 # Close chart and WAIT for it to disappear
-                pyautogui.click(2406, 184)
-                time.sleep(0.1)
-                pyautogui.click(1792, 1204)
+                close_chart_window(chart_win)
                 wait_for_window_close(chart_title_re, timeout=3)
                 control.add_log("Closed chart")
 
@@ -2393,6 +2700,13 @@ def _start_monitoring(control, outbound_worker=None):
 
                 if data:
                     control.add_log(f"Successfully extracted data for {name}")
+
+                    # In demo mode, quick check for outbound after each extraction
+                    if demo_mode and outbound_worker:
+                        processed = outbound_worker.process_pending()
+                        if processed > 0:
+                            control.add_log(f"Outbound: processed {processed} event(s)")
+                            demo_status_overlay.update_status("Extraction complete", f"Processed {processed} event(s)")
 
                 # Quick re-scan (no sleep, just clear and rescan)
                 clear_patient_overlays()
@@ -2536,53 +2850,83 @@ def _start_monitoring(control, outbound_worker=None):
             control.add_log(f"Analytics save error: {str(analytics_err)[:40]}")
 
         # Cleanup all overlays
-        clear_patient_overlays()  # Clear patient row overlays first
-        for root in [wr_overlay_root, patient_log_root, roomed_overlay_root, discharged_overlay_root, patient_overlay_root, extracted_data_root]:
-            if root:
-                try:
-                    root.after(0, root.quit)
-                except:
-                    pass
+        if demo_mode:
+            if demo_status_overlay:
+                demo_status_overlay.stop()
+            if demo_extracted_overlay:
+                demo_extracted_overlay.stop()
+        else:
+            clear_patient_overlays()  # Clear patient row overlays first
+            for root in [wr_overlay_root, patient_log_root, roomed_overlay_root, discharged_overlay_root, patient_overlay_root, extracted_data_root]:
+                if root:
+                    try:
+                        root.after(0, root.quit)
+                    except:
+                        pass
         time.sleep(0.5)  # Give overlays time to close
 
 
 def _change_location(control):
-    """Change clinic location to ATTALLA via menu navigation."""
+    """Change clinic location to ATTALLA via menu navigation.
+    Flow: CLICK Clinic menu → HOVER Current Clinic (opens submenu) → CLICK ATTALLA.
+    Uses fixed pixel offsets from window top-left (web app layout is fixed).
+    """
     import pyautogui
-
-    # Coordinates from tracker.py - exact screen positions
-    CLINIC_MENU = {"x": 177, "y": 67}
-    CURRENT_CLINIC = {"x": 223, "y": 203}
-    ATTALLA = {"x": 399, "y": 246}
+    from pywinauto import Application, findwindows
 
     try:
-        # Step 1: Click Clinic menu
+        # Connect to the Tracking Board / Experity window
+        elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+        target_handle = None
+        for elem in elements:
+            if 'Setup' not in elem.name:
+                target_handle = elem.handle
+                break
+
+        if not target_handle:
+            control.add_log("Tracking Board not found for location change")
+            return False
+
+        app = Application(backend='uia').connect(handle=target_handle, timeout=3)
+        win = app.window(handle=target_handle)
+        win_rect = win.rectangle()
+        w_left, w_top = win_rect.left, win_rect.top
+        control.add_log(f"Window rect: left={w_left}, top={w_top}, right={win_rect.right}, bottom={win_rect.bottom}")
+
+        # Fixed pixel offsets from window top-left (from original 2560x1440 layout)
+        clinic_x = w_left + 177
+        clinic_y = w_top + 67
+        current_x = w_left + 223
+        current_y = w_top + 203
+        attalla_x = w_left + 399
+        attalla_y = w_top + 246
+
+        # Step 1: CLICK Clinic menu (opens dropdown)
         control.set_step("Opening Clinic menu...")
-        control.add_log(f"Step 1: Clicking Clinic menu at ({CLINIC_MENU['x']}, {CLINIC_MENU['y']})")
-
-        show_target(CLINIC_MENU['x'], CLINIC_MENU['y'], "CLINIC MENU", color="#2196F3", width=120, height=35, duration=0.6)
-        time.sleep(0.4)
-        pyautogui.click(CLINIC_MENU['x'], CLINIC_MENU['y'])
+        control.add_log(f"Clicking Clinic menu at ({clinic_x}, {clinic_y})")
+        show_target(clinic_x, clinic_y, "CLINIC MENU", color="#2196F3", width=120, height=35, duration=0.8)
+        time.sleep(0.6)
+        pyautogui.click(clinic_x, clinic_y)
         control.add_log("Clicked Clinic menu")
-        time.sleep(0.5)
+        time.sleep(1.0)
 
-        # Step 2: Hover over Current Clinic to open submenu
-        control.set_step("Selecting Current Clinic...")
-
-        show_target(CURRENT_CLINIC['x'], CURRENT_CLINIC['y'], "CURRENT CLINIC", color="#FF9800", width=140, height=35, duration=0.6)
-        time.sleep(0.4)
-        pyautogui.moveTo(CURRENT_CLINIC['x'], CURRENT_CLINIC['y'], duration=0.2)
+        # Step 2: HOVER Current Clinic (opens submenu - DO NOT click!)
+        control.set_step("Hovering Current Clinic...")
+        control.add_log(f"Hovering Current Clinic at ({current_x}, {current_y})")
+        show_target(current_x, current_y, "CURRENT CLINIC", color="#FF9800", width=140, height=35, duration=0.8)
+        time.sleep(0.6)
+        pyautogui.moveTo(current_x, current_y, duration=0.3)
         control.add_log("Hovering over Current Clinic")
-        time.sleep(0.5)
+        time.sleep(1.0)
 
-        # Step 3: Click ATTALLA
+        # Step 3: CLICK ATTALLA
         control.set_step("Selecting ATTALLA...")
-
-        show_target(ATTALLA['x'], ATTALLA['y'], "ATTALLA", color="#4CAF50", width=100, height=35, duration=0.6)
-        time.sleep(0.4)
-        pyautogui.click(ATTALLA['x'], ATTALLA['y'])
+        control.add_log(f"Clicking ATTALLA at ({attalla_x}, {attalla_y})")
+        show_target(attalla_x, attalla_y, "ATTALLA", color="#4CAF50", width=100, height=35, duration=0.8)
+        time.sleep(0.6)
+        pyautogui.click(attalla_x, attalla_y)
         control.add_log("Clicked ATTALLA - location changed!")
-        time.sleep(0.8)
+        time.sleep(1.5)
 
         control.add_log("Location change completed successfully")
         return True

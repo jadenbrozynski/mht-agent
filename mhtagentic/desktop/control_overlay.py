@@ -1200,6 +1200,401 @@ class AnalyticsDashboardOverlay:
             pass
 
 
+class DemoStatusOverlay:
+    """
+    Sleek bottom-center status bar for demo mode.
+
+    Shows inbound/outbound status in a minimal bar.
+    Size: ~600x36, centered horizontally, 60px from bottom.
+    Style: #3a3a3a bg, 0.85 alpha, no title bar, no borders.
+    """
+
+    def __init__(self):
+        self.root: Optional[tk.Tk] = None
+        self.panel: Optional[tk.Toplevel] = None
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._inbound_text = "Idle"
+        self._outbound_text = "Idle"
+        self._status_label: Optional[tk.Label] = None
+
+    def start(self):
+        """Start the demo status overlay."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        time.sleep(0.3)
+
+    def _run(self):
+        """Run the overlay."""
+        try:
+            self.root = tk.Tk()
+            self.root.withdraw()
+            self._create_panel()
+            self.root.mainloop()
+        except Exception as e:
+            logger.error(f"Demo status overlay error: {e}")
+        finally:
+            self._running = False
+
+    def _create_panel(self):
+        """Create the status bar panel — dynamically resizes to fit text."""
+        self.panel = tk.Toplevel(self.root)
+        self.panel.overrideredirect(True)
+        self.panel.attributes("-topmost", True)
+        self.panel.attributes("-alpha", 0.90)
+
+        self._panel_height = 38
+        self._radius = 12
+        self._bg = "#2d2d2d"
+        self._transparent = "#f0f0f0"
+        self._screen_width = self.root.winfo_screenwidth()
+        self._screen_height = self.root.winfo_screenheight()
+        self._y_pos = self._screen_height - self._panel_height - 200
+
+        self.panel.configure(bg=self._transparent)
+        try:
+            self.panel.attributes("-transparentcolor", self._transparent)
+        except:
+            self.panel.configure(bg=self._bg)
+
+        self._canvas = tk.Canvas(
+            self.panel, height=self._panel_height,
+            bg=self._transparent, highlightthickness=0, bd=0
+        )
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+
+        self._status_label = tk.Label(
+            self.panel,
+            text=f"Inbound: {self._inbound_text}  |  Outbound: {self._outbound_text}",
+            font=("Segoe UI", 10),
+            bg=self._bg,
+            fg="#e0e0e0"
+        )
+
+        # Initial size
+        self._resize_to_fit()
+
+    def _resize_to_fit(self):
+        """Resize the panel to fit the current label text."""
+        self._status_label.config(wraplength=0)  # No wrapping
+        self._status_label.update_idletasks()
+        text_width = self._status_label.winfo_reqwidth()
+        text_height = self._status_label.winfo_reqheight()
+        panel_width = text_width + 60  # generous padding
+        panel_width = max(panel_width, 300)  # minimum
+
+        x_pos = (self._screen_width - panel_width) // 2
+        self.panel.geometry(f"{panel_width}x{self._panel_height}+{x_pos}+{self._y_pos}")
+
+        self._canvas.config(width=panel_width)
+        self._canvas.delete("all")
+        self._draw_rounded_rect(self._canvas, 0, 0, panel_width, self._panel_height, self._radius, self._bg)
+        self._canvas.create_window(panel_width // 2, self._panel_height // 2, window=self._status_label, width=text_width + 10)
+
+    @staticmethod
+    def _draw_rounded_rect(canvas, x1, y1, x2, y2, r, fill):
+        """Draw a rounded rectangle on a canvas."""
+        canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90, fill=fill, outline=fill)
+        canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline=fill)
+        canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline=fill)
+
+    def update_status(self, inbound_text=None, outbound_text=None):
+        """Update the status bar text (thread-safe). Pass None to leave a side unchanged."""
+        if inbound_text is not None:
+            self._inbound_text = inbound_text
+        if outbound_text is not None:
+            self._outbound_text = outbound_text
+        if self._status_label and self.root and self._running:
+            try:
+                self.root.after(0, self._do_update_status)
+            except:
+                pass
+
+    def _do_update_status(self):
+        """Update label text and resize panel to fit."""
+        if self._status_label:
+            self._status_label.config(
+                text=f"Inbound: {self._inbound_text}  |  Outbound: {self._outbound_text}"
+            )
+            self._resize_to_fit()
+
+    def stop(self):
+        """Stop the overlay."""
+        self._running = False
+        if self.root:
+            try:
+                self.root.after(0, self._close)
+            except:
+                pass
+
+    def _close(self):
+        try:
+            if self.panel:
+                self.panel.destroy()
+            if self.root:
+                self.root.quit()
+                self.root.destroy()
+        except:
+            pass
+
+
+class DemoExtractedDataOverlay:
+    """
+    Sleek top-left extracted data panel for demo mode.
+
+    Shows extracted patient data without pharmacy field.
+    Only displays a patient once all key fields have been extracted.
+    Rounded corners via transparent background + Canvas.
+    Draggable via header area.
+    """
+
+    # Minimum fields required before showing a patient
+    _REQUIRED_FIELDS = ('first_name', 'last_name', 'dob')
+
+    def __init__(self):
+        self.root: Optional[tk.Tk] = None
+        self.panel: Optional[tk.Toplevel] = None
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._data_text: Optional[tk.Text] = None
+        self._count_label: Optional[tk.Label] = None
+        self._title_label: Optional[tk.Label] = None
+        self._patients: list = []
+        self._pending: dict = {}  # name -> patient_data (waiting for completion)
+
+    def start(self):
+        """Start the demo extracted data overlay."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        time.sleep(0.3)
+
+    def _run(self):
+        """Run the overlay."""
+        try:
+            self.root = tk.Tk()
+            self.root.withdraw()
+            self._create_panel()
+            self.root.mainloop()
+        except Exception as e:
+            logger.error(f"Demo extracted data overlay error: {e}")
+        finally:
+            self._running = False
+
+    def _create_panel(self):
+        """Create the extracted data panel with rounded corners."""
+        self.panel = tk.Toplevel(self.root)
+        self.panel.overrideredirect(True)
+        self.panel.attributes("-topmost", True)
+        self.panel.attributes("-alpha", 0.92)
+
+        self._panel_width = 480
+        panel_height = 370
+
+        # Position bottom-left, 60px from bottom
+        screen_height = self.root.winfo_screenheight()
+        y_pos = screen_height - panel_height - 60
+        self.panel.geometry(f"{self._panel_width}x{panel_height}+20+{y_pos}")
+
+        bg = "#2d2d2d"
+        inner_bg = "#252525"
+        text_fg = "#e0e0e0"
+        muted_fg = "#9a9a9a"
+        radius = 18
+
+        # Use a transparent color trick for rounded corners on Windows
+        transparent = "#f0f0f0"
+        self.panel.configure(bg=transparent)
+        try:
+            self.panel.attributes("-transparentcolor", transparent)
+        except:
+            # Fallback if transparentcolor not supported
+            self.panel.configure(bg=bg)
+
+        pw = self._panel_width
+
+        # Canvas for rounded rectangle background
+        canvas = tk.Canvas(
+            self.panel, width=pw, height=panel_height,
+            bg=transparent, highlightthickness=0, bd=0
+        )
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Draw rounded rectangle
+        self._draw_rounded_rect(canvas, 0, 0, pw, panel_height, radius, bg)
+
+        # Header area on canvas — title + count
+        self._title_label = tk.Label(
+            self.panel,
+            text="Extracted Data",
+            font=("Segoe UI", 10, "bold"),
+            bg=bg, fg=text_fg
+        )
+        canvas.create_window(14, 10, anchor="nw", window=self._title_label)
+
+        self._count_label = tk.Label(
+            self.panel,
+            text="0 patients",
+            font=("Segoe UI", 9),
+            bg=bg, fg=muted_fg
+        )
+        canvas.create_window(pw - 14, 13, anchor="ne", window=self._count_label)
+
+        # Thin separator line on canvas
+        canvas.create_line(12, 34, pw - 12, 34, fill="#555555", width=1)
+
+        # Text widget for patient data — no wrapping so lines stay on one line
+        self._data_text = tk.Text(
+            self.panel,
+            bg=inner_bg,
+            fg=text_fg,
+            font=("Consolas", 9),
+            wrap=tk.NONE,
+            highlightthickness=0,
+            borderwidth=0,
+            insertbackground=text_fg,
+            padx=6,
+            pady=4
+        )
+        canvas.create_window(
+            12, 40, anchor="nw", width=pw - 24, height=panel_height - 56,
+            window=self._data_text
+        )
+        self._data_text.insert(tk.END, "Waiting for qualified patients...\n")
+        self._data_text.config(state=tk.DISABLED)
+
+        # Make entire panel draggable via canvas
+        canvas.bind("<Button-1>", self._start_drag)
+        canvas.bind("<B1-Motion>", self._drag)
+        self._title_label.bind("<Button-1>", self._start_drag)
+        self._title_label.bind("<B1-Motion>", self._drag)
+        self._count_label.bind("<Button-1>", self._start_drag)
+        self._count_label.bind("<B1-Motion>", self._drag)
+
+    @staticmethod
+    def _draw_rounded_rect(canvas, x1, y1, x2, y2, r, fill):
+        """Draw a rounded rectangle on a canvas."""
+        canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90, fill=fill, outline=fill)
+        canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90, fill=fill, outline=fill)
+        canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline=fill)
+        canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline=fill)
+
+    def _start_drag(self, event):
+        """Start dragging the window."""
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+
+    def _drag(self, event):
+        """Handle window dragging."""
+        if self.panel:
+            x = self.panel.winfo_x() + (event.x - self._drag_start_x)
+            y = self.panel.winfo_y() + (event.y - self._drag_start_y)
+            self.panel.geometry(f"+{x}+{y}")
+
+    def _is_complete(self, patient_data):
+        """Check if patient data has all required fields populated."""
+        for field in self._REQUIRED_FIELDS:
+            val = patient_data.get(field, '')
+            if not val or val == 'N/A':
+                return False
+        return True
+
+    def add_patient(self, patient_data):
+        """Add a patient's extracted data. Only displays once extraction is complete."""
+        if not self._is_complete(patient_data):
+            # Stash as pending — may get called again with more data
+            name_key = patient_data.get('name', '').upper()
+            if name_key:
+                self._pending[name_key] = patient_data
+            return
+
+        # Remove from pending if present
+        name_key = patient_data.get('name', '').upper()
+        self._pending.pop(name_key, None)
+
+        self._patients.append(patient_data)
+        if self._data_text and self.root and self._running:
+            try:
+                self.root.after(0, lambda: self._do_add_patient(patient_data))
+            except:
+                pass
+
+    def _do_add_patient(self, patient_data):
+        """Replace display with latest patient data."""
+        if not self._data_text:
+            return
+        self._data_text.config(state=tk.NORMAL)
+
+        # Always clear and show only the latest patient
+        self._data_text.delete(1.0, tk.END)
+
+        # Extract fields (no pharmacy)
+        first = patient_data.get('first_name', '')
+        last = patient_data.get('last_name', '')
+        dob = patient_data.get('dob', 'N/A')
+        mrn = patient_data.get('mrn', 'N/A')
+        phone = patient_data.get('cell_phone', 'N/A')
+        email = patient_data.get('email', 'N/A')
+        gender = patient_data.get('gender', 'N/A')
+        insurance = patient_data.get('insurance', 'N/A')
+        race = patient_data.get('race', 'N/A')
+        ethnicity = patient_data.get('ethnicity', 'N/A')
+        language = patient_data.get('language', 'N/A')
+
+        self._data_text.insert(tk.END, f"  Name:      {last}, {first}\n")
+        self._data_text.insert(tk.END, f"  DOB:       {dob}\n")
+        self._data_text.insert(tk.END, f"  MRN:       {mrn}\n")
+        self._data_text.insert(tk.END, f"  Phone:     {phone}\n")
+        self._data_text.insert(tk.END, f"  Email:     {email}\n")
+        self._data_text.insert(tk.END, f"  Gender:    {gender}\n")
+        self._data_text.insert(tk.END, f"  Insurance: {insurance}\n")
+        self._data_text.insert(tk.END, f"  Race:      {race}\n")
+        self._data_text.insert(tk.END, f"  Ethnicity: {ethnicity}\n")
+        self._data_text.insert(tk.END, f"  Language:  {language}\n")
+
+        # Show extraction time if available
+        extract_secs = patient_data.get('_extract_seconds')
+        if extract_secs is not None:
+            self._data_text.insert(tk.END, f"  Extracted in {extract_secs}s\n")
+
+        self._data_text.see(tk.END)
+        self._data_text.config(state=tk.DISABLED)
+
+        # Update count
+        if self._count_label:
+            count = len(self._patients)
+            self._count_label.config(text=f"{count} patient{'s' if count != 1 else ''}")
+
+    def stop(self):
+        """Stop the overlay."""
+        self._running = False
+        if self.root:
+            try:
+                self.root.after(0, self._close)
+            except:
+                pass
+
+    def _close(self):
+        try:
+            if self.panel:
+                self.panel.destroy()
+            if self.root:
+                self.root.quit()
+                self.root.destroy()
+        except:
+            pass
+
+
 # Global instance for singleton access
 _control_overlay: Optional[ControlOverlay] = None
 _mode_selection: Optional[ModeSelectionOverlay] = None
