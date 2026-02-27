@@ -357,11 +357,11 @@ class ControlOverlay:
         self._panel_width = panel_width
         self._panel_height = panel_height
 
-        # Position in bottom-right corner
+        # Position in bottom-right corner (percentage-based)
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x_pos = screen_width - panel_width - int(40 * s)
-        y_pos = screen_height - panel_height - int(180 * s)
+        x_pos = screen_width - panel_width - int(screen_width * 0.02)
+        y_pos = int(screen_height * 0.63)
 
         self.panel.geometry(f"{panel_width}x{panel_height}+{x_pos}+{y_pos}")
 
@@ -769,7 +769,7 @@ class ControlOverlay:
                     new_height = int(360 * s)
                     pw = getattr(self, '_panel_width', int(260 * s))
                     x_pos = self.panel.winfo_x()
-                    y_pos = screen_height - new_height - int(180 * s)
+                    y_pos = int(screen_height * 0.63)
                     self.panel.geometry(f"{pw}x{new_height}+{x_pos}+{y_pos}")
                     self.panel.update()
                 # Focus the entry after a short delay
@@ -796,7 +796,7 @@ class ControlOverlay:
                     ph = getattr(self, '_panel_height', int(240 * s))
                     pw = getattr(self, '_panel_width', int(260 * s))
                     x_pos = self.panel.winfo_x()
-                    y_pos = screen_height - ph - int(180 * s)
+                    y_pos = int(screen_height * 0.63)
                     self.panel.geometry(f"{pw}x{ph}+{x_pos}+{y_pos}")
                     # CRITICAL: Ensure panel remains visible after hiding input
                     self.panel.update_idletasks()
@@ -1545,18 +1545,7 @@ class DemoExtractedDataOverlay:
         return True
 
     def add_patient(self, patient_data):
-        """Add a patient's extracted data. Only displays once extraction is complete."""
-        if not self._is_complete(patient_data):
-            # Stash as pending — may get called again with more data
-            name_key = patient_data.get('name', '').upper()
-            if name_key:
-                self._pending[name_key] = patient_data
-            return
-
-        # Remove from pending if present
-        name_key = patient_data.get('name', '').upper()
-        self._pending.pop(name_key, None)
-
+        """Add a patient's extracted data. Always displays immediately."""
         self._patients.append(patient_data)
         if self._data_text and self.root and self._running:
             try:

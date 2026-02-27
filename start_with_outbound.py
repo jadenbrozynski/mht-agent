@@ -31,8 +31,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mht_agentic")
 
-# Database path
-DB_PATH = SCRIPT_DIR / "output" / "mht_data.db"
+# Database path — shared location writable by all users
+from mhtagentic import OUTPUT_DIR
+DB_PATH = OUTPUT_DIR / "mht_data.db"
 
 from mhtagentic.outbound.outbound_worker import OutboundWorker
 from mhtagentic.desktop.control_overlay import ControlOverlay

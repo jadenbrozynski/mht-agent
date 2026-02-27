@@ -337,7 +337,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
 
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "output/mht_data.db"
+    from mhtagentic import OUTPUT_DIR
+    db_path = sys.argv[1] if len(sys.argv) > 1 else str(OUTPUT_DIR / "mht_data.db")
     interval = int(sys.argv[2]) if len(sys.argv) > 2 else 10
 
     processor = MHTResultProcessor(db_path, poll_interval_seconds=interval)

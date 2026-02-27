@@ -41,6 +41,20 @@ if _env_path.exists():
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
+# Ensure pywin32 DLLs are findable (Python 3.8+ restricts DLL search)
+_pywin32_dll_dirs = [
+    os.path.join(os.environ.get("PYTHONPATH", "").split(";")[0], "pywin32_system32"),
+    r"C:\ProgramData\MHTAgentic\site-packages\pywin32_system32",
+    r"C:\ProgramData\MHTAgentic\site-packages\win32",
+    str(SCRIPT_DIR),
+]
+for _dll_dir in _pywin32_dll_dirs:
+    if os.path.isdir(_dll_dir):
+        try:
+            os.add_dll_directory(_dll_dir)
+        except (OSError, AttributeError):
+            pass
+
 from mhtagentic.desktop.control_overlay import (
     ControlOverlay,
     reset_control_overlay,
@@ -316,8 +330,9 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     tracked_patients = {}  # Store patient data
     previous_roomed_patients = {}  # Track roomed patients for discharge detection
 
-    # Database for event tracking
-    db = MHTDatabase(SCRIPT_DIR / "output" / "mht_data.db")
+    # Database for event tracking — use shared ProgramData path so dashboard can read it
+    from mhtagentic import OUTPUT_DIR as _OUTPUT_DIR
+    db = MHTDatabase(_OUTPUT_DIR / "mht_data.db")
     patient_event_ids = {}  # {patient_name_upper: event_id}
 
     # === ELEMENT DETECTION HELPERS (replace fixed sleeps) ===
@@ -374,12 +389,16 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             texts = demo_win.descendants(control_type='Text')
 
             # Build list of labels we care about
+            # Experity labels include colons (e.g. "First Name:")
             label_map = {
-                'First Name': 'first_name',
-                'Last Name': 'last_name',
-                'Date of Birth': 'dob',
-                'Cell Phone': 'cell_phone',
-                'Email': 'email',
+                'First Name:': 'first_name',
+                'Last Name:': 'last_name',
+                'Birthday:': 'dob',
+                'Cell Phone#:': 'cell_phone',
+                'Home Phone#:': 'home_phone',
+                'Email:': 'email',
+                'Address 1:': 'address1',
+                'Zip:': 'zip',
             }
 
             # Find label positions
@@ -398,7 +417,17 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                 except:
                     pass
 
+            # Debug: dump ALL text elements found in the demographics window
+            all_texts_found = []
+            for t in texts[:50]:
+                try:
+                    all_texts_found.append(t.window_text().strip())
+                except:
+                    pass
+            print(f"[extract] ALL texts in demo window: {all_texts_found}", flush=True)
+            print(f"[extract] labels found: {[lp['label'] for lp in label_positions]}", flush=True)
             if not label_positions:
+                print("[extract] NO labels found in demographics window!", flush=True)
                 return fields
 
             # Get window midpoint to distinguish left vs right side
@@ -488,50 +517,72 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
     def close_chart_window(chart_win):
         """
-        Close a chart window (sidebar + main window) using pywinauto element detection.
-        Uses element detection, falls back to window-relative positions.
-        Falls back to window-relative positions.
+        Close a chart window:
+        1. Find and click the 'Close' button (sidebar close) via pywinauto
+        2. Find the 'Close Chart' confirmation button and click it
         """
+        from pywinauto import findwindows, Application as PwApp
         try:
-            win_rect = chart_win.rectangle()
+            # Step 1: Click the sidebar "Close" button
+            try:
+                close_btn = chart_win.child_window(title='Close', control_type='Button')
+                if close_btn.exists():
+                    print(f"[close_chart] clicking sidebar 'Close' button", flush=True)
+                    close_btn.click_input()
+                    time.sleep(0.5)
+            except Exception as e:
+                print(f"[close_chart] sidebar close err: {e}", flush=True)
+                # Fallback: top-right area click
+                win_rect = chart_win.rectangle()
+                pyautogui.click(win_rect.right - 50, win_rect.top + 95)
+                time.sleep(0.5)
 
-            # Strategy 1: Find close buttons via element detection
-            buttons = chart_win.descendants(control_type='Button')
-            close_buttons = []
-            for btn in buttons:
+            # Step 2: Find and click the "Close Chart" button
+            # It appears either in the same window or in a new "Close Chart - ..." window
+            close_clicked = False
+
+            # Try in the existing chart window first
+            try:
+                cc_btn = chart_win.child_window(title='Close Chart', control_type='Button')
+                if cc_btn.exists():
+                    print(f"[close_chart] found 'Close Chart' in chart_win, clicking", flush=True)
+                    cc_btn.click_input()
+                    close_clicked = True
+            except:
+                pass
+
+            # Try finding a "Close Chart" window
+            if not close_clicked:
                 try:
-                    btn_text = btn.window_text()
-                    if btn_text in ['Close', 'X', 'close', '\ue5cd', '\u2715', '\u2716']:
-                        rect = btn.rectangle()
-                        close_buttons.append({
-                            'btn': btn,
-                            'rect': rect,
-                            'x': (rect.left + rect.right) // 2,
-                            'y': (rect.top + rect.bottom) // 2,
-                        })
-                except:
-                    continue
+                    cc_win = wait_for_window('.*Close Chart.*', timeout=3)
+                    if cc_win:
+                        print(f"[close_chart] found 'Close Chart' window", flush=True)
+                        try:
+                            cc_btn = cc_win.child_window(title='Close Chart', control_type='Button')
+                            if cc_btn.exists():
+                                print(f"[close_chart] clicking 'Close Chart' button in dialog", flush=True)
+                                cc_btn.click_input()
+                                close_clicked = True
+                        except:
+                            # Click all buttons with "close" in text
+                            for btn in cc_win.descendants(control_type='Button'):
+                                try:
+                                    bt = btn.window_text()
+                                    if 'close chart' in bt.lower():
+                                        print(f"[close_chart] clicking button '{bt}'", flush=True)
+                                        btn.click_input()
+                                        close_clicked = True
+                                        break
+                                except:
+                                    continue
+                except Exception as e:
+                    print(f"[close_chart] Close Chart window search err: {e}", flush=True)
 
-            if close_buttons:
-                # Sort by X position descending - rightmost first (sidebar close), then main close
-                close_buttons.sort(key=lambda b: b['x'], reverse=True)
-                for cb in close_buttons:
-                    pyautogui.click(cb['x'], cb['y'])
-                    time.sleep(0.1)
-                return
+            if not close_clicked:
+                print(f"[close_chart] WARNING: could not find Close Chart button", flush=True)
 
-            # Strategy 2: Fall back to window-relative positions
-            # Sidebar close: near top-right of window
-            sidebar_x = win_rect.right - 30
-            sidebar_y = win_rect.top + 40
-            pyautogui.click(sidebar_x, sidebar_y)
-            time.sleep(0.1)
-
-            # Main chart close: center-bottom area of window
-            chart_cx = (win_rect.left + win_rect.right) // 2
-            chart_cy = win_rect.bottom - 30
-            pyautogui.click(chart_cx, chart_cy)
         except Exception as e:
+            print(f"[close_chart] error: {e}", flush=True)
             control.add_log(f"close_chart_window error: {str(e)[:40]}")
 
     # === BACKGROUND ERROR DETECTION THREAD ===
@@ -642,6 +693,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         from datetime import datetime
         from pathlib import Path
 
+        # Add clinic location to raw data so outbound knows where to switch
+        bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
+        patient_data['clinic_location'] = bot_location
+
         # Create DB event with raw data FIRST (status=PENDING)
         event_id = db.create_event(patient_data, kind="patient_extraction")
 
@@ -719,8 +774,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         appointment_datetime = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
 
         # Build MHT API JSON structure (Modify Appointment format)
+        bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
         mht_api_payload = {
-            "clinic_id": 110,  # Southern Immediate Care - Attalla clinic ID (placeholder, get from MHT)
+            "clinic_id": 110,  # Southern Immediate Care clinic ID (placeholder, get from MHT)
+            "clinic_location": bot_location,
             "patient": {
                 "patient_id": patient_id,
                 "patient_first_name": first_name,
@@ -751,6 +808,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                 "generated_at": datetime.now().isoformat(),
                 "sent_at": datetime.now().isoformat(),
                 "source": "MHTAgentic Experity Automation",
+                "clinic_location": bot_location,
                 "patient_name_full": patient_data.get('name', f"{last_name}, {first_name}"),
                 "extraction_status": "complete",
                 "expired": False,
@@ -2015,6 +2073,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         clear_patient_overlays()
 
         # Click patient name and WAIT for Demographics window to appear (no fixed sleep)
+        print(f"[extract] clicking {name} at ({cx},{cy})", flush=True)
         pyautogui.click(cx, cy)
         patient_data = {'name': name, 'clicked': True}
 
@@ -2022,18 +2081,22 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             # Wait for Demographics window - proceeds instantly when it appears
             demo_win = wait_for_window('.*Demographics.*', timeout=5)
             if not demo_win:
+                print(f"[extract] no demo win on 1st try, dismissing popups", flush=True)
                 dismiss_popup_dialogs()
                 demo_win = wait_for_window('.*Demographics.*', timeout=3)
 
             if not demo_win:
+                print(f"[extract] Demographics window NEVER opened for {name}", flush=True)
                 control.add_log(f"Demographics window didn't open for {name}")
                 close_demographics_window(demo_win) if demo_win else None
                 return patient_data
 
+            print(f"[extract] Demographics window found for {name}", flush=True)
             control.set_step("Extracting...")
 
             # BATCH EXTRACT: Get all elements at once using label-based detection
             demo_fields = extract_demographics_fields(demo_win)
+            print(f"[extract] demo_fields={demo_fields}", flush=True)
             patient_data.update(demo_fields)
 
             texts = demo_win.descendants(control_type='Text')
@@ -2074,10 +2137,13 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             control.add_log(f"Extracted: {', '.join(extracted)}")
 
             # Close demographics and WAIT for it to disappear (no fixed sleep)
+            print(f"[extract] closing demographics for {name}", flush=True)
             close_demographics_window(demo_win)
-            wait_for_window_close('.*Demographics.*', timeout=3)
+            closed = wait_for_window_close('.*Demographics.*', timeout=3)
+            print(f"[extract] demographics closed={closed}", flush=True)
 
         except Exception as e:
+            print(f"[extract] Demographics error: {e}", flush=True)
             control.add_log(f"Demographics error: {str(e)[:30]}")
             if demo_win:
                 close_demographics_window(demo_win)
@@ -2246,14 +2312,18 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     control.add_log(f"Insurance extraction error: {str(ins_err)[:30]}")
 
                 # Close sidebar then chart, WAIT for chart to disappear
+                print(f"[extract] closing chart window", flush=True)
                 close_chart_window(chart_win)
-                wait_for_window_close(chart_title_re, timeout=3)
+                chart_closed = wait_for_window_close(chart_title_re, timeout=3)
+                print(f"[extract] chart closed={chart_closed}", flush=True)
                 control.add_log("Chart closed")
 
             else:
+                print(f"[extract] chart icon NOT found", flush=True)
                 control.add_log("Chart icon not found")
 
         except Exception as chart_err:
+            print(f"[extract] Chart error: {chart_err}", flush=True)
             control.add_log(f"Chart error: {str(chart_err)[:30]}")
             try:
                 if chart_win:
@@ -2891,9 +2961,9 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         time.sleep(0.5)  # Give overlays time to close
 
 
-def _change_location(control):
-    """Change clinic location to ATTALLA via menu navigation.
-    Flow: CLICK Clinic menu → HOVER Current Clinic (opens submenu) → CLICK ATTALLA.
+def _change_location(control, target_location="ATTALLA"):
+    """Change clinic location via menu navigation.
+    Flow: CLICK Clinic menu → HOVER Current Clinic (opens submenu) → CLICK target location.
     Uses pywinauto element detection first, falls back to proportional window offsets.
     """
     import pyautogui
@@ -2985,37 +3055,37 @@ def _change_location(control):
         control.add_log("Hovering over Current Clinic")
         time.sleep(1.0)
 
-        # Step 3: CLICK ATTALLA
-        control.set_step("Selecting ATTALLA...")
+        # Step 3: CLICK target location
+        control.set_step(f"Selecting {target_location}...")
 
-        # Try element detection for ATTALLA
-        attalla_found = False
+        # Try element detection for target location
+        location_found = False
         try:
             for elem in win.descendants():
                 try:
                     name = (elem.element_info.name or '').lower()
-                    if 'attalla' in name:
+                    if target_location.lower() in name:
                         rect = elem.rectangle()
                         cx, cy = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
-                        control.add_log(f"Found ATTALLA: '{elem.element_info.name}' at ({cx},{cy})")
-                        show_target(cx, cy, "ATTALLA", color="#4CAF50", width=rect.right - rect.left + 20, height=rect.bottom - rect.top + 10, duration=0.8)
+                        control.add_log(f"Found {target_location}: '{elem.element_info.name}' at ({cx},{cy})")
+                        show_target(cx, cy, target_location, color="#4CAF50", width=rect.right - rect.left + 20, height=rect.bottom - rect.top + 10, duration=0.8)
                         time.sleep(0.6)
                         pyautogui.click(cx, cy)
-                        attalla_found = True
+                        location_found = True
                         break
                 except:
                     continue
         except:
             pass
 
-        if not attalla_found:
-            attalla_x = w_left + int(w_width * 0.156)
-            attalla_y = w_top + int(w_height * 0.171)
-            show_target(attalla_x, attalla_y, "ATTALLA", color="#4CAF50", width=80, height=30, duration=0.8)
+        if not location_found:
+            loc_x = w_left + int(w_width * 0.156)
+            loc_y = w_top + int(w_height * 0.171)
+            show_target(loc_x, loc_y, target_location, color="#4CAF50", width=80, height=30, duration=0.8)
             time.sleep(0.6)
-            pyautogui.click(attalla_x, attalla_y)
+            pyautogui.click(loc_x, loc_y)
 
-        control.add_log("Clicked ATTALLA - location changed!")
+        control.add_log(f"Clicked {target_location} - location changed!")
         time.sleep(1.5)
 
         control.add_log("Location change completed successfully")
@@ -3347,24 +3417,25 @@ def _fast_login(control):
                         pass
                     time.sleep(1)
 
-                # ===== CHANGE LOCATION TO ATTALLA =====
+                # ===== CHANGE LOCATION =====
+                bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
                 try:
                     control.set_status("Location")
-                    control.set_step("Changing to ATTALLA...")
-                    control.add_log("Starting location change process")
+                    control.set_step(f"Changing to {bot_location}...")
+                    control.add_log(f"Starting location change to {bot_location}")
                 except:
                     pass
-                print("Starting location change process")
+                print(f"Starting location change to {bot_location}")
 
-                _change_location(control)
+                _change_location(control, target_location=bot_location)
 
                 try:
                     control.set_status("Success")
-                    control.set_step("Ready at ATTALLA!")
-                    control.add_log("Location changed - starting monitoring")
+                    control.set_step(f"Ready at {bot_location}!")
+                    control.add_log(f"Location changed to {bot_location} - starting monitoring")
                 except:
                     pass
-                print("Location changed - starting monitoring")
+                print(f"Location changed to {bot_location} - starting monitoring")
 
                 # Start monitoring the Waiting Room
                 time.sleep(1.0)
@@ -3400,19 +3471,199 @@ def _fast_login(control):
             print(f"Traceback: {traceback.format_exc()}")
 
 
-if __name__ == "__main__":
-    try:
-        run_silent()
-    except Exception as e:
-        # Last resort error logging
-        import traceback
-        error_file = SCRIPT_DIR / "output" / "debug" / "crash_log.txt"
-        error_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(error_file, "w") as f:
-            f.write(f"CRASH LOG\n")
-            f.write(f"Error: {str(e)}\n")
-            f.write(f"Traceback:\n{traceback.format_exc()}\n")
+def run_monitor_only(mode="inbound"):
+    """Run in monitor-only mode — skip launch/login, connect to existing Experity window.
 
-        # Show error in a simple message box
-        import tkinter.messagebox as mb
-        mb.showerror("MHT Agentic Crash", f"Script crashed!\n\nError: {str(e)}\n\nCheck: {error_file}")
+    Used by 'Start Monitoring' dashboard button when Experity is already open and logged in.
+
+    Args:
+        mode: "inbound" to monitor Waiting Room, "outbound" to process assessment results.
+    """
+    global _automation, _control
+
+    print(f"[monitor-only] starting mode={mode}", flush=True)
+
+    print("[monitor-only] reset_control_overlay...", flush=True)
+    reset_control_overlay()
+
+    _should_exit = False
+
+    def on_kill():
+        nonlocal _should_exit
+        _should_exit = True
+
+    print("[monitor-only] creating ControlOverlay...", flush=True)
+    _control = ControlOverlay(
+        on_kill=on_kill,
+        on_debug=save_debug,
+        on_record=toggle_recording
+    )
+    print("[monitor-only] starting ControlOverlay...", flush=True)
+    _control.start()
+    print("[monitor-only] ControlOverlay started, sleeping 0.3s...", flush=True)
+    time.sleep(0.3)
+
+    try:
+        bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
+        print(f"[monitor-only] bot_location={bot_location}", flush=True)
+        try:
+            print("[monitor-only] calling set_status...", flush=True)
+            _control.set_status("Connecting")
+            print("[monitor-only] calling set_step...", flush=True)
+            _control.set_step(f"Finding Experity window ({mode})...")
+            print("[monitor-only] calling add_log...", flush=True)
+            _control.add_log(f"Monitor-only mode={mode}, location={bot_location}")
+            print("[monitor-only] overlay updates done", flush=True)
+        except Exception as overlay_err:
+            print(f"[monitor-only] overlay error (non-fatal): {overlay_err}", flush=True)
+
+        # Find existing Experity window (don't launch it)
+        print("[monitor-only] creating DesktopAutomation...", flush=True)
+        _automation = DesktopAutomation()
+        print("[monitor-only] calling find_experity_window...", flush=True)
+
+        # Debug: list ALL windows visible to this process
+        try:
+            import pygetwindow as gw
+            all_wins = gw.getAllWindows()
+            print(f"[monitor-only] pygetwindow sees {len(all_wins)} windows:", flush=True)
+            for w in all_wins:
+                if w.title.strip():
+                    print(f"  - '{w.title}'", flush=True)
+        except Exception as gw_err:
+            print(f"[monitor-only] pygetwindow enum failed: {gw_err}", flush=True)
+
+        if not _automation.find_experity_window():
+            print("[monitor-only] Experity window NOT found!", flush=True)
+            _control.set_status("Error")
+            _control.set_step("Experity window not found")
+            _control.add_log("ERROR: Experity window not found — is it open?")
+            time.sleep(5)
+            _control.stop()
+            return
+        print(f"[monitor-only] Found Experity window: {_automation.window.title}", flush=True)
+
+        _control.set_status("Connected")
+        _control.set_step("Found Experity window")
+        _control.add_log("Experity window found")
+
+        if _should_exit:
+            _control.stop()
+            return
+
+        # Skip location change — RDPs are already on the correct location
+        _control.add_log(f"Location: {bot_location} (already set)")
+
+        if _should_exit:
+            _control.stop()
+            return
+
+        if mode == "outbound":
+            # Pure outbound mode: simulator + outbound worker, NO patient scraping
+            # Configure logging so outbound_worker logger output goes to stdout
+            logging.basicConfig(
+                level=logging.INFO,
+                format='[%(name)s] %(message)s',
+                stream=sys.stdout,
+                force=True
+            )
+            from mhtagentic.outbound.outbound_worker import OutboundWorker
+            from mhtagentic.db.mht_simulator import MHTResponseSimulator
+            from mhtagentic import OUTPUT_DIR as _OUT_DIR
+            db_path = str(_OUT_DIR / "mht_data.db")
+
+            # Start simulator — watches for inbound events, creates outbound events after delay
+            simulator = MHTResponseSimulator(db_path, response_delay_seconds=15)
+            simulator.start()
+            print("[outbound] MHT Simulator started (15s delay)", flush=True)
+            _control.add_log("Simulator started (15s delay)")
+
+            worker = OutboundWorker(db_path, poll_interval=5.0, overlay=_control)
+            _control.set_status("Outbound")
+            _control.set_step("Waiting for outbound events...")
+            _control.add_log(f"Outbound polling loop at {bot_location}")
+            print("[monitor-only] entering outbound polling loop", flush=True)
+            try:
+                while True:
+                    try:
+                        processed = worker.process_pending()
+                        if processed > 0:
+                            _control.set_step(f"Processed {processed} event(s)")
+                            _control.add_log(f"Outbound: processed {processed} event(s)")
+                            print(f"[outbound] processed {processed} event(s)", flush=True)
+                        else:
+                            _control.set_step("Waiting for outbound events...")
+                    except Exception as poll_err:
+                        print(f"[outbound] poll error: {poll_err}", flush=True)
+                        _control.add_log(f"Poll error: {poll_err}")
+                    time.sleep(5)
+            finally:
+                simulator.stop()
+                print("[outbound] simulator stopped", flush=True)
+        else:
+            # Inbound mode: monitor Waiting Room (demo_mode=True for overlays)
+            _control.set_status("Monitoring")
+            _control.set_step(f"Starting inbound ({bot_location})...")
+            _control.add_log(f"Starting inbound monitoring at {bot_location}")
+            time.sleep(1.0)
+            _start_monitoring(_control, demo_mode=True)
+
+    except BaseException as e:
+        print(f"[monitor-only] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        print(traceback.format_exc(), flush=True)
+        try:
+            _control.set_status("Error")
+            _control.set_step(str(e)[:50])
+            _control.add_log(f"ERROR: {str(e)}")
+            _control.add_log(traceback.format_exc())
+        except:
+            pass
+        time.sleep(5)
+
+    finally:
+        print("[monitor-only] cleanup", flush=True)
+        try:
+            _control.stop()
+        except:
+            pass
+
+
+if __name__ == "__main__":
+    print(f"[launcher] argv={sys.argv}", flush=True)
+    args = sys.argv[1:]
+
+    if "--monitor-only" in args:
+        # Monitor-only mode: skip launch/login, connect to existing Experity
+        mode = "inbound"
+        if "-outbound" in args:
+            mode = "outbound"
+        print(f"[launcher] monitor-only mode={mode}", flush=True)
+        try:
+            run_monitor_only(mode=mode)
+        except Exception as e:
+            import traceback
+            print(f"[launcher] CRASH: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            error_file = SCRIPT_DIR / "output" / "debug" / "crash_log.txt"
+            error_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(error_file, "w") as f:
+                f.write(f"CRASH LOG (monitor-only)\n")
+                f.write(f"Error: {str(e)}\n")
+                f.write(f"Traceback:\n{traceback.format_exc()}\n")
+    else:
+        try:
+            run_silent()
+        except Exception as e:
+            # Last resort error logging
+            import traceback
+            error_file = SCRIPT_DIR / "output" / "debug" / "crash_log.txt"
+            error_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(error_file, "w") as f:
+                f.write(f"CRASH LOG\n")
+                f.write(f"Error: {str(e)}\n")
+                f.write(f"Traceback:\n{traceback.format_exc()}\n")
+
+            # Show error in a simple message box
+            import tkinter.messagebox as mb
+            mb.showerror("MHT Agentic Crash", f"Script crashed!\n\nError: {str(e)}\n\nCheck: {error_file}")

@@ -10,12 +10,20 @@ import json
 import time
 import threading
 import logging
+import ctypes
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Callable, TYPE_CHECKING
 
+# Enable DPI awareness so pyautogui coordinates match pywinauto coordinates
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
+
 from pywinauto import Application, findwindows, Desktop
 import pyautogui
+from mhtagentic.desktop.session_guard import session_find_elements, session_connect
 
 if TYPE_CHECKING:
     from mhtagentic.desktop.control_overlay import ControlOverlay
@@ -54,6 +62,9 @@ class OutboundWorker:
         self._processing = False  # Flag to indicate if currently processing
         self._overlay = overlay  # UI overlay for status updates
         self.demo_mode = False  # Skip hide/show overlays in demo mode
+        self._demo_overlays = []  # Demo overlay references for re-lifting
+        import os
+        self._current_location = os.environ.get("BOT_LOCATION", "ATTALLA").upper()
 
     def set_callback(self, callback: Callable[[Dict], None]):
         """Set callback function called when an event is processed."""
@@ -103,16 +114,166 @@ class OutboundWorker:
         except Exception as e:
             logger.warning(f"Hide overlays failed: {e}")
 
+    def set_demo_overlays(self, overlays: list):
+        """Set demo overlay references for re-lifting after outbound processing."""
+        self._demo_overlays = overlays
+
     def _show_all_overlays(self):
         """Show ALL overlays after outbound processing."""
         if self.demo_mode:
-            return  # No overlays to restore in demo mode
+            # Re-lift demo overlays that may have gone behind Experity windows
+            for overlay in self._demo_overlays:
+                try:
+                    if overlay and hasattr(overlay, 'panel') and overlay.panel and overlay._running:
+                        overlay.root.after(0, lambda o=overlay: self._relift_demo_overlay(o))
+                except Exception as e:
+                    logger.warning(f"Failed to re-lift demo overlay: {e}")
+            return
         try:
             from mhtagentic.desktop.control_overlay import show_all_overlays
             show_all_overlays()
+
             logger.info("All overlays restored after outbound processing")
         except Exception as e:
             logger.warning(f"Show all overlays failed: {e}")
+
+    @staticmethod
+    def _relift_demo_overlay(overlay):
+        """Re-lift a demo overlay to topmost."""
+        try:
+            if overlay.panel and overlay.panel.winfo_exists():
+                overlay.panel.deiconify()
+                overlay.panel.lift()
+                overlay.panel.attributes("-topmost", True)
+        except Exception:
+            pass
+
+    def _switch_location(self, target_location: str):
+        """Switch Experity clinic location before processing a patient from a different location.
+
+        Navigates: Clinic menu → Current Clinic → target_location.
+        Uses pywinauto element detection by auto_id/name for reliable clicking.
+        """
+        import time as _time
+        from pywinauto import Application, findwindows
+
+        try:
+            elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+            target_handle = None
+            for elem in elements:
+                if 'Setup' not in elem.name:
+                    target_handle = elem.handle
+                    break
+
+            if not target_handle:
+                logger.error("Tracking Board not found for location switch")
+                return False
+
+            app = Application(backend='uia').connect(handle=target_handle, timeout=3)
+            win = app.window(handle=target_handle)
+
+            # Step 1: Click Clinic menu (auto_id='Clinic', type=MenuItem)
+            logger.info("Location switch: clicking Clinic menu...")
+            try:
+                clinic_menu = win.child_window(auto_id='Clinic', control_type='MenuItem')
+                clinic_menu.click_input()
+                logger.info("Clicked Clinic menu via auto_id")
+            except Exception as e:
+                logger.warning(f"Clinic menu auto_id lookup failed: {e}, trying name search...")
+                # Fallback: search descendants for the exact 'Clinic' MenuItem
+                clicked = False
+                for elem in win.descendants(control_type='MenuItem'):
+                    try:
+                        if elem.element_info.name == 'Clinic':
+                            elem.click_input()
+                            clicked = True
+                            break
+                    except:
+                        continue
+                if not clicked:
+                    logger.error("Could not find Clinic menu item")
+                    return False
+
+            _time.sleep(1.0)
+
+            # Step 2: Hover "Current Clinic" to open submenu (DO NOT click)
+            logger.info("Location switch: hovering Current Clinic...")
+            current_found = False
+            # After clicking Clinic, menu items appear as descendants
+            for elem in win.descendants():
+                try:
+                    name = (elem.element_info.name or '')
+                    if 'Current Clinic' in name or ('current' in name.lower() and 'clinic' in name.lower()):
+                        rect = elem.rectangle()
+                        cx = (rect.left + rect.right) // 2
+                        cy = (rect.top + rect.bottom) // 2
+                        pyautogui.moveTo(cx, cy, duration=0.3)
+                        current_found = True
+                        logger.info(f"Hovering over '{name}' at ({cx},{cy})")
+                        break
+                except:
+                    continue
+
+            if not current_found:
+                logger.warning("Current Clinic not found in descendants, trying child_window...")
+                try:
+                    current_item = win.child_window(title_re='.*Current Clinic.*')
+                    rect = current_item.rectangle()
+                    pyautogui.moveTo((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2, duration=0.3)
+                    current_found = True
+                except:
+                    logger.error("Could not find Current Clinic submenu")
+
+            _time.sleep(1.0)
+
+            # Step 3: Click target location in the submenu
+            logger.info(f"Location switch: clicking {target_location}...")
+            location_found = False
+            target_lower = target_location.lower()
+            for elem in win.descendants():
+                try:
+                    name = (elem.element_info.name or '')
+                    if target_lower in name.lower() and elem.element_info.control_type in ('MenuItem', 'ListItem', 'Text', 'Button', 'Hyperlink', 'Custom'):
+                        rect = elem.rectangle()
+                        # Only click elements that are in the menu area (small, not full-width table headers)
+                        el_width = rect.right - rect.left
+                        if el_width < 300:
+                            cx = (rect.left + rect.right) // 2
+                            cy = (rect.top + rect.bottom) // 2
+                            pyautogui.click(cx, cy)
+                            location_found = True
+                            logger.info(f"Clicked '{name}' (type={elem.element_info.control_type}) at ({cx},{cy})")
+                            break
+                except:
+                    continue
+
+            if not location_found:
+                logger.error(f"Could not find {target_location} in submenu")
+                pyautogui.press('escape')
+                _time.sleep(0.3)
+                pyautogui.press('escape')
+                return False
+
+            logger.info(f"Location switched to {target_location}")
+            # Wait for Tracking Board to reload after location change
+            _time.sleep(3.0)
+            # Verify Tracking Board is back by polling for it
+            for _ in range(10):
+                try:
+                    elems = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+                    if any('Setup' not in e.name for e in elems):
+                        logger.info("Tracking Board available after location switch")
+                        break
+                except:
+                    pass
+                _time.sleep(1.0)
+            return True
+
+        except Exception as e:
+            logger.error(f"Location switch error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
     def start(self):
         """Start the worker thread."""
@@ -218,8 +379,30 @@ class OutboundWorker:
             # Parse the event data
             raw_data = json.loads(event['raw_data'])
             data = raw_data.get('data', raw_data)
+
+            # Check if we need to switch clinic location before processing
+            event_location = data.get('clinic_location', '') or ''
+            if not event_location:
+                # Try to get from clinic object
+                clinic = data.get('clinic', {})
+                event_location = clinic.get('clinic_location', 'ATTALLA')
+                # Strip prefix like "SOUTHERN IMMEDIATE CARE - " if present
+                if ' - ' in event_location:
+                    event_location = event_location.split(' - ')[-1]
+            if event_location and event_location.upper() != self._current_location.upper():
+                logger.info(f"Switching location: {self._current_location} → {event_location.upper()}")
+                self._switch_location(event_location.upper())
+                self._current_location = event_location.upper()
+
             patient = data.get('patient', {})
-            patient_name = f"{patient.get('patient_last_name')}, {patient.get('patient_first_name')}"
+            last_name = patient.get('patient_last_name', '') or ''
+            first_name = patient.get('patient_first_name', '') or ''
+            patient_name = f"{last_name}, {first_name}"
+
+            if not last_name.strip() and not first_name.strip():
+                logger.error(f"Event {event_id} has no patient name - skipping")
+                self._update_event_status(event_id, self.STATUS_ERROR)
+                return
 
             assessments = data.get('assessment', [])
             if not isinstance(assessments, list):
@@ -272,7 +455,7 @@ class OutboundWorker:
             # ===== STEP 1: Connect to Tracking Board =====
             logger.info("[Step 1] Connecting to Tracking Board...")
             self._update_overlay_step(1, 21, "Connecting to Tracking Board...")
-            elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+            elements = session_find_elements(title_re='.*Tracking Board.*', backend='uia')
             target_handle = None
             for elem in elements:
                 if 'Setup' not in elem.name:
@@ -326,128 +509,226 @@ class OutboundWorker:
             logger.info("[Step 3] Clicking chart icon...")
             self._update_overlay_step(3, 21, "Clicking chart icon...")
             images = patient_row.descendants(control_type='Image')
+            if not images:
+                logger.error("No chart icon found in patient row")
+                return False
             chart_icon = images[0]
             rect = chart_icon.rectangle()
             pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
 
             # ===== STEP 4: Wait for chart window =====
-            logger.info("[Step 4] Waiting for chart window...")
+            logger.info(f"[Step 4] Waiting for chart window (name_part='{name_part}')...")
             self._update_overlay_step(4, 21, "Loading chart...")
+            import re as _re
+            chart_title_re = f'.*{_re.escape(name_part)}.*'
             chart_win = None
-            for _ in range(30):  # Poll for chart window
+            for _ in range(20):  # Poll for chart window
                 try:
-                    chart_app = Application(backend='uia').connect(title_re=f'.*{name_part}.*', timeout=1)
-                    chart_win = chart_app.window(title_re=f'.*{name_part}.*')
+                    chart_app, chart_win = session_connect(title_re=chart_title_re, timeout=1)
                     break
                 except:
                     pass
             if not chart_win:
-                logger.error("Chart window not found")
+                logger.error(f"Chart window not found for pattern '{chart_title_re}'")
                 return False
+            logger.info(f"Chart window found: {chart_win.window_text()[:60]}")
 
             # ===== STEP 5: Navigate to Procedures/Supplies =====
             logger.info("[Step 5] Clicking Procedures/Supplies...")
             self._update_overlay_step(5, 21, "Opening Procedures/Supplies...")
-            for _ in range(20):  # Poll for element
+            for _ in range(30):  # Poll for element
                 found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'TabItem' and 'procedures' in (elem.element_info.name or '').lower():
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
-                            break
-                    except:
-                        pass
+                try:
+                    tabs = chart_win.descendants(control_type='TabItem')
+                    for elem in tabs:
+                        try:
+                            if 'procedures' in (elem.element_info.name or '').lower():
+                                rect = elem.rectangle()
+                                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                                found = True
+                                break
+                        except:
+                            pass
+                except:
+                    pass
                 if found:
                     break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+                time.sleep(0.1)
 
             # ===== STEP 6: Navigate to SIC COMMON ORDERS =====
             logger.info("[Step 6] Clicking SIC COMMON ORDERS...")
             self._update_overlay_step(6, 21, "Opening SIC Common Orders...")
-            for _ in range(20):  # Poll for element
-                found = False
+            time.sleep(0.3)  # Brief settle after Procedures tab
+
+            # Log ALL element names containing "sic" to a debug file so we know what's there
+            debug_log = Path(r"C:\ProgramData\MHTAgentic\debug\step6_elements.log")
+            debug_log.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                sic_names = []
+                all_names = []
                 for elem in chart_win.descendants():
                     try:
-                        name = elem.element_info.name or ''
-                        if 'sic common' in name.lower():
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
-                            break
+                        ename = (elem.element_info.name or '').strip()
+                        if ename:
+                            all_names.append(ename)
+                        if 'sic' in ename.lower():
+                            sic_names.append(ename)
+                    except:
+                        pass
+                with open(debug_log, "w") as df:
+                    df.write(f"SIC elements: {sic_names}\n\n")
+                    df.write(f"All elements ({len(all_names)}):\n")
+                    for n in all_names:
+                        df.write(f"  {n}\n")
+                logger.info(f"[Step 6] SIC elements: {sic_names}")
+            except Exception as dbg_err:
+                logger.info(f"[Step 6] Debug scan error: {dbg_err}")
+
+            # Click "SIC COMMON ORDERS" TabItem specifically
+            found = False
+            for _ in range(30):
+                try:
+                    # Match exactly "SIC COMMON ORDERS" TabItem
+                    sic_elem = chart_win.child_window(title='SIC COMMON ORDERS', control_type='TabItem')
+                    if sic_elem.exists(timeout=0):
+                        rect = sic_elem.rectangle()
+                        pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                        found = True
+                        logger.info(f"[Step 6] Clicked 'SIC COMMON ORDERS' TabItem")
+                        break
+                except:
+                    pass
+
+                if not found:
+                    # Fallback: scan TabItems for anything containing "SIC" and "COMMON"
+                    try:
+                        for elem in chart_win.descendants(control_type='TabItem'):
+                            try:
+                                ename = (elem.element_info.name or '').strip().upper()
+                                if 'SIC' in ename and 'COMMON' in ename:
+                                    rect = elem.rectangle()
+                                    pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                                    found = True
+                                    logger.info(f"[Step 6] Clicked TabItem: '{ename}'")
+                                    break
+                            except:
+                                pass
                     except:
                         pass
                 if found:
                     break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+                time.sleep(0.1)
 
-            # ===== STEP 7: Click on assessment in list =====
-            logger.info(f"[Step 7] Clicking {assess_name}...")
+            # ===== STEP 7: Click on assessment in SIC list =====
+            logger.info(f"[Step 7] Finding {assess_name} via pywinauto...")
             self._update_overlay_step(7, 21, f"Selecting {assess_name}...")
-            for _ in range(20):  # Poll for element
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        name = elem.element_info.name or ''
-                        ctrl_type = elem.element_info.control_type
-                        auto_id = elem.element_info.automation_id or ''
-                        if ctrl_type == 'Text' and auto_id == 'ContentItemTextBlock' and any(kw in name.lower() for kw in keywords):
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
-                            break
-                    except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+            time.sleep(1.0)
 
-            # ===== STEP 8: Click assessment description header =====
-            logger.info("[Step 8] Clicking description header...")
+            # Find the target assessment Text element in UIA tree
+            target_elem = None
+            for elem in chart_win.descendants(control_type='Text'):
+                try:
+                    auto_id = elem.element_info.automation_id or ''
+                    if auto_id == 'ContentItemTextBlock':
+                        ename = (elem.element_info.name or '').lower()
+                        if any(kw in ename for kw in keywords):
+                            target_elem = elem
+                            break
+                except:
+                    pass
+
+            if not target_elem:
+                logger.error(f"Assessment '{assess_name}' not found in UIA tree")
+                return False
+
+            target_name = target_elem.element_info.name or assess_name
+            logger.info(f"[Step 7] Found: '{target_name}'")
+
+            # Get SIC group visible area
+            try:
+                sic_group = chart_win.child_window(title='SIC COMMON ORDERS', control_type='Group')
+                sic_rect = sic_group.rectangle()
+            except:
+                sic_rect = chart_win.rectangle()
+
+            # If off-screen, scroll until visible (retry up to 5 times)
+            sic_cx = (sic_rect.left + sic_rect.right) // 2
+            sic_cy = (sic_rect.top + sic_rect.bottom) // 2
+            for scroll_attempt in range(5):
+                target_rect = target_elem.rectangle()
+                if target_rect.top >= sic_rect.top and target_rect.bottom <= sic_rect.bottom:
+                    break  # Visible
+                logger.info(f"Off-screen (y={target_rect.top}, visible={sic_rect.top}-{sic_rect.bottom}), scrolling attempt {scroll_attempt+1}...")
+                pyautogui.moveTo(sic_cx, sic_cy)
+                pyautogui.scroll(-150)
+                time.sleep(0.3)
+                target_rect = target_elem.rectangle()
+                logger.info(f"After scroll: y={target_rect.top}")
+
+            # Click the assessment
+            target_rect = target_elem.rectangle()
+            pyautogui.click((target_rect.left + target_rect.right) // 2,
+                            (target_rect.top + target_rect.bottom) // 2)
+            logger.info(f"[Step 7] Clicked '{target_name}'")
+            time.sleep(0.5)
+
+            # ===== STEP 8: Double-click description in procedures grid to open form =====
+            logger.info("[Step 8] Opening assessment form...")
             self._update_overlay_step(8, 21, "Opening assessment form...")
-            for _ in range(20):  # Poll for element
-                found = False
-                for elem in chart_win.descendants():
+
+            desc_elem = None
+            for _ in range(30):
+                for elem in chart_win.descendants(control_type='Text'):
                     try:
-                        name = elem.element_info.name or ''
-                        ctrl_type = elem.element_info.control_type
+                        ename = (elem.element_info.name or '').lower()
                         auto_id = elem.element_info.automation_id or ''
-                        if ctrl_type == 'Text' and auto_id != 'ContentItemTextBlock' and any(kw in name.lower() for kw in keywords):
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
+                        if auto_id != 'ContentItemTextBlock' and any(kw in ename for kw in keywords):
+                            desc_elem = elem
                             break
                     except:
                         pass
-                if found:
+                if desc_elem:
                     break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+                time.sleep(0.1)
 
-            # ===== STEP 9: Fill out the form =====
+            if not desc_elem:
+                logger.error("Assessment description not found in procedures grid")
+                return False
+
+            rect = desc_elem.rectangle()
+            pyautogui.doubleClick((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+            logger.info(f"[Step 8] Double-clicked description to open form")
+
+            # ===== STEP 9: Fill out form =====
             logger.info("[Step 9] Filling out form...")
-            self._update_overlay_step(9, 21, "Filling assessment scores...")
-            # Poll for radio buttons to appear
+            self._update_overlay_step(9, 21, "Filling assessment form...")
+
+            # Wait for radio buttons to appear
             all_radios = []
-            for _ in range(20):
+            for _ in range(40):
                 all_radios = []
-                for elem in chart_win.descendants():
+                for elem in chart_win.descendants(control_type='RadioButton'):
                     try:
-                        if elem.element_info.control_type == 'RadioButton':
-                            rect = elem.rectangle()
-                            all_radios.append({'name': elem.element_info.name, 'elem': elem, 'y': rect.top, 'x': rect.left})
+                        rect = elem.rectangle()
+                        name = elem.element_info.name or ''
+                        all_radios.append({'name': name, 'elem': elem, 'y': rect.top, 'x': rect.left})
                     except:
                         pass
-                if len(all_radios) > 5:  # Got enough radio buttons
+                if len(all_radios) >= 8:
                     break
+                time.sleep(0.1)
 
-            all_radios.sort(key=lambda x: (x['y'], x['x']))
+            if not all_radios:
+                logger.error("No radio buttons found - form may not have opened")
+                return False
 
+            # Sort by y then x, group into rows
+            all_radios.sort(key=lambda r: (r['y'], r['x']))
             rows = []
             current_row = []
             current_y = -100
             for btn in all_radios:
-                if btn['y'] > current_y + 30:
+                if btn['y'] > current_y + 20:
                     if current_row:
                         rows.append(current_row)
                     current_row = [btn]
@@ -457,156 +738,266 @@ class OutboundWorker:
             if current_row:
                 rows.append(current_row)
 
-            # Click patient (row 0)
-            if rows:
-                btn = rows[0][0]
-                rect = btn['elem'].rectangle()
-                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+            logger.info(f"[Step 9] Found {len(rows)} rows, {len(all_radios)} radio buttons")
 
-            # Fill questions based on scores - NO DELAYS
+            # Row 0 = patient/caregiver (2 buttons), click "patient"
+            # Rows 1-7 (GAD-7) or 1-9 (PHQ-9) = scored questions (4 buttons each)
+            # Last row = Q10 difficulty (4 buttons, vertical layout)
+
+            # 9a: Click "patient" radio
+            if rows and len(rows[0]) == 2:
+                patient_btn = rows[0][0]  # First button = "patient"
+                rect = patient_btn['elem'].rectangle()
+                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                logger.info(f"[Step 9a] Selected 'patient' radio")
+                scored_rows = rows[1:]  # Skip patient/caregiver row
+            else:
+                scored_rows = rows
+
+            # Separate scored question rows (4 buttons horizontal) from Q10 difficulty (4 buttons vertical)
+            question_rows = []
+            difficulty_row = []
+            for row in scored_rows:
+                if len(row) == 4:
+                    question_rows.append(row)
+                elif len(row) == 1:
+                    difficulty_row.append(row[0])
+
+            # If difficulty buttons are individual rows (vertical layout), group them
+            if not difficulty_row and len(question_rows) > 0:
+                # Check if last few rows might be difficulty (single-column vertical)
+                # Difficulty buttons: "Not difficult at all", "Somewhat difficult", etc.
+                for row in scored_rows:
+                    for btn in row:
+                        if 'difficult' in btn['name'].lower():
+                            difficulty_row.append(btn)
+
+            # 9b: Fill scored questions (Q1-Q7 or Q1-Q9)
             for i, score in enumerate(scores):
-                row_idx = i + 1
-                if row_idx < len(rows) and score < len(rows[row_idx]):
-                    btn = rows[row_idx][score]
+                if i < len(question_rows) and score < len(question_rows[i]):
+                    btn = question_rows[i][score]
                     rect = btn['elem'].rectangle()
                     pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                    time.sleep(0.05)
 
-            # Q10 difficulty
-            if len(rows) > 10:
-                btn = rows[10][0]
-                rect = btn['elem'].rectangle()
-                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+            logger.info(f"[Step 9b] Filled {min(len(scores), len(question_rows))} scored questions")
 
-            # ===== STEP 10: Enter total score =====
-            logger.info("[Step 10] Entering total score...")
-            self._update_overlay_step(10, 21, f"Entering total score: {total_score}...")
-            # Click center of chart window to ensure focus before scrolling
+            # 9c: Scroll DOWN -1000 to snap to bottom of form
+            logger.info("[Step 9c] Scrolling to bottom of form...")
             chart_rect = chart_win.rectangle()
-            chart_center_x = (chart_rect.left + chart_rect.right) // 2
-            chart_center_y = (chart_rect.top + chart_rect.bottom) // 2
-            pyautogui.click(chart_center_x, chart_center_y)
-            pyautogui.scroll(-500)
+            form_cx = (chart_rect.left + chart_rect.right) // 2
+            form_cy = (chart_rect.top + chart_rect.bottom) // 2
+            pyautogui.moveTo(form_cx, form_cy)
+            pyautogui.scroll(-1000)
+            time.sleep(0.3)
 
-            for _ in range(20):  # Poll for total score field
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'Edit' and 'total score' in (elem.element_info.name or '').lower():
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            pyautogui.hotkey('ctrl', 'a')
-                            pyautogui.typewrite(str(total_score))
-                            pyautogui.press('enter')
-                            found = True
-                            break
-                    except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
-
-            # ===== STEP 11: Cancel and delete =====
-            logger.info("[Step 11] Clicking Cancel...")
-            self._update_overlay_step(11, 21, "Cancelling form...")
-            pyautogui.scroll(500)
-
-            for _ in range(20):  # Poll for cancel button
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'Button' and elem.element_info.automation_id == 'cmdCancel2':
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
-                            break
-                    except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
-
-            # ===== STEP 12: Delete assessment =====
-            logger.info("[Step 12] Deleting assessment...")
-            self._update_overlay_step(12, 21, "Deleting assessment...")
-            phq_y = None
-            for elem in chart_win.descendants():
+            # Re-find radio buttons after scroll (positions changed)
+            difficulty_btns = []
+            for elem in chart_win.descendants(control_type='RadioButton'):
                 try:
                     name = elem.element_info.name or ''
-                    if any(kw in name.lower() for kw in keywords):
-                        phq_y = elem.rectangle().top
+                    if 'difficult' in name.lower():
+                        rect = elem.rectangle()
+                        difficulty_btns.append({'name': name, 'elem': elem, 'y': rect.top})
+                except:
+                    pass
+            difficulty_btns.sort(key=lambda b: b['y'])
+
+            # 9d: Answer Q10 difficulty
+            if difficulty_btns:
+                if total_score < 10:
+                    diff_btn = difficulty_btns[0]  # "Not difficult at all"
+                else:
+                    diff_btn = difficulty_btns[1] if len(difficulty_btns) > 1 else difficulty_btns[0]
+                rect = diff_btn['elem'].rectangle()
+                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                logger.info(f"[Step 9d] Selected difficulty: '{diff_btn['name']}'")
+            else:
+                logger.warning("[Step 9d] No difficulty radio buttons found")
+
+            # ===== STEP 10: Enter total score =====
+            logger.info(f"[Step 10] Entering total score: {total_score}...")
+            self._update_overlay_step(10, 21, f"Score: {total_score}...")
+
+            score_entered = False
+            for elem in chart_win.descendants(control_type='Edit'):
+                try:
+                    ename = (elem.element_info.name or '').lower()
+                    if 'total' in ename or 'add up' in ename or 'record' in ename:
+                        rect = elem.rectangle()
+                        pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                        pyautogui.hotkey('ctrl', 'a')
+                        pyautogui.typewrite(str(total_score), interval=0.02)
+                        score_entered = True
+                        logger.info(f"[Step 10] Entered total score: {total_score}")
                         break
                 except:
                     pass
 
-            for _ in range(20):  # Poll for delete button
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'Button' and 'delete' in (elem.element_info.name or '').lower():
-                            rect = elem.rectangle()
-                            if phq_y and abs(rect.top - phq_y) < 30:
-                                pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                                found = True
-                                break
-                    except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+            if not score_entered:
+                logger.warning("Could not find total score field")
 
-            # Poll for OK confirmation
-            for _ in range(20):
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'Button' and (elem.element_info.name or '').lower() == 'ok':
-                            rect = elem.rectangle()
+            # ===== STEP 10b: Enter referral note =====
+            referral_text = "Referral – Yes" if total_score >= 10 else "Referral – No"
+            logger.info(f"[Step 10b] Entering note: {referral_text}")
+            self._update_overlay_step(10, 21, f"Notes: {referral_text}")
+
+            notes_entered = False
+            for elem in chart_win.descendants(control_type='Edit'):
+                try:
+                    auto_id = (elem.element_info.automation_id or '')
+                    if auto_id == 'txtNotes':
+                        rect = elem.rectangle()
+                        pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                        pyautogui.hotkey('ctrl', 'a')
+                        pyautogui.typewrite(referral_text, interval=0.02)
+                        notes_entered = True
+                        logger.info(f"[Step 10b] Entered notes: {referral_text}")
+                        break
+                except:
+                    pass
+
+            if not notes_entered:
+                logger.warning("Could not find Notes field")
+
+            # ===== STEP 11: Scroll back up, cancel form, delete assessment =====
+            logger.info("[Step 11] Scrolling back up...")
+            self._update_overlay_step(11, 21, "Closing form...")
+
+            pyautogui.moveTo(form_cx, form_cy)
+            pyautogui.scroll(1000)
+            time.sleep(0.3)
+
+            # Click Cancel to close the form (data is captured, don't save to Experity)
+            for elem in chart_win.descendants(control_type='Button'):
+                try:
+                    auto_id = (elem.element_info.automation_id or '')
+                    if auto_id in ('cmdCancel2', 'cmdCancel'):
+                        rect = elem.rectangle()
+                        pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                        logger.info(f"[Step 11] Clicked Cancel ({auto_id})")
+                        break
+                except:
+                    pass
+
+            time.sleep(0.5)
+
+            # ===== STEP 12: Delete the assessment from procedures grid =====
+            logger.info("[Step 12] Deleting assessment from grid...")
+            self._update_overlay_step(12, 21, "Removing assessment...")
+
+            # Find and click the delete button for the procedure row
+            delete_clicked = False
+            for elem in chart_win.descendants(control_type='Button'):
+                try:
+                    btn_name = (elem.element_info.name or '').lower()
+                    auto_id = (elem.element_info.automation_id or '').lower()
+                    if 'delete' in btn_name or 'delete' in auto_id or 'remove' in btn_name:
+                        rect = elem.rectangle()
+                        if rect.top > 200 and rect.top < 300:  # In the procedures grid area
                             pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
+                            delete_clicked = True
+                            logger.info(f"[Step 12] Clicked delete button")
+                            break
+                except:
+                    pass
+
+            if not delete_clicked:
+                # Try right-clicking the procedure row and selecting delete
+                for elem in chart_win.descendants(control_type='Text'):
+                    try:
+                        ename = (elem.element_info.name or '').lower()
+                        auto_id = elem.element_info.automation_id or ''
+                        if auto_id != 'ContentItemTextBlock' and any(kw in ename for kw in keywords):
+                            rect = elem.rectangle()
+                            pyautogui.rightClick((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                            time.sleep(0.3)
+                            # Look for Delete in context menu
+                            pyautogui.press('delete')
+                            logger.info("[Step 12] Right-clicked and pressed Delete")
+                            delete_clicked = True
                             break
                     except:
                         pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+
+            time.sleep(0.5)
+
+            # Handle any "Are you sure?" confirmation dialog
+            if delete_clicked:
+                time.sleep(0.3)
+                for elem in chart_win.descendants(control_type='Button'):
+                    try:
+                        btn_name = (elem.element_info.name or '').lower()
+                        if btn_name in ('yes', 'ok', 'delete', 'confirm'):
+                            rect = elem.rectangle()
+                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                            logger.info(f"[Step 12] Confirmed delete: '{elem.element_info.name}'")
+                            break
+                    except:
+                        pass
+
+            time.sleep(0.5)
 
             # ===== STEP 13: Close chart =====
             logger.info("[Step 13] Closing chart...")
-            self._update_overlay_step(13, 21, "Saving and closing chart...")
-            for _ in range(20):  # Poll for save button
-                found = False
-                for elem in chart_win.descendants():
-                    try:
-                        if elem.element_info.control_type == 'Button' and elem.element_info.automation_id == 'SaveButton':
-                            rect = elem.rectangle()
-                            pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
-                            break
-                    except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+            self._update_overlay_step(13, 21, "Closing chart...")
 
-            for _ in range(20):  # Poll for btnSave
-                found = False
-                for elem in chart_win.descendants():
+            # Step 13a: Click Close/X button on the chart
+            close_clicked = False
+            buttons = chart_win.descendants(control_type='Button')
+            for btn in buttons:
+                try:
+                    btn_text = btn.window_text()
+                    if btn_text in ['Close', 'X', 'close', '\ue5cd', '\u2715', '\u2716']:
+                        rect = btn.rectangle()
+                        pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+                        close_clicked = True
+                        logger.info(f"Clicked close button: '{btn_text}'")
+                        break
+                except:
+                    continue
+            if not close_clicked:
+                win_rect = chart_win.rectangle()
+                pyautogui.click(win_rect.right - 30, win_rect.top + 40)
+                logger.info("Used fallback close click (top-right)")
+
+            # Step 13b: Handle "Close Chart" confirmation dialog
+            time.sleep(0.3)
+            confirmed = False
+            try:
+                buttons2 = chart_win.descendants(control_type='Button')
+                for btn in buttons2:
                     try:
-                        if elem.element_info.control_type == 'Button' and elem.element_info.automation_id == 'btnSave':
-                            rect = elem.rectangle()
+                        if btn.window_text() == 'Close Chart':
+                            rect = btn.rectangle()
                             pyautogui.click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-                            found = True
+                            logger.info("Clicked 'Close Chart' confirmation")
+                            confirmed = True
                             break
                     except:
-                        pass
-                if found:
-                    break
-                time.sleep(0.05)  # Small delay to prevent UI overload
+                        continue
+            except:
+                pass
+
+            # Step 13c: Try finding dialog as separate window
+            if not confirmed:
+                try:
+                    dialogs = session_find_elements(title_re='.*Close Chart.*', backend='uia')
+                    if dialogs:
+                        dlg_app = Application(backend='uia').connect(handle=dialogs[0].handle, timeout=2)
+                        dlg_win = dlg_app.window(handle=dialogs[0].handle)
+                        close_chart_btn = dlg_win.child_window(control_type='Button', title='Close Chart')
+                        close_chart_btn.click_input()
+                        logger.info("Clicked 'Close Chart' via dialog window")
+                except:
+                    pass
+
+            time.sleep(0.3)  # Brief settle after chart close
 
             # ===== STEP 14: Click patient name =====
             logger.info("[Step 14] Clicking patient name...")
             self._update_overlay_step(14, 21, "Opening patient demographics...")
-            elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+            elements = session_find_elements(title_re='.*Tracking Board.*', backend='uia')
             target_handle = None
             for elem in elements:
                 if 'Setup' not in elem.name:
@@ -643,8 +1034,7 @@ class OutboundWorker:
             # Poll for demographics window and Documents tab
             for _ in range(30):
                 try:
-                    demo_app = Application(backend='uia').connect(title_re=f'.*{name_part}.*', timeout=1)
-                    demo_win = demo_app.window(title_re=f'.*{name_part}.*')
+                    demo_app, demo_win = session_connect(title_re=f'.*{name_part}.*', timeout=2)
                     found = False
                     for elem in demo_win.descendants():
                         try:
@@ -668,8 +1058,7 @@ class OutboundWorker:
             scan_upload_found = False
             for attempt in range(50):  # 50 * 0.2s = 10 seconds max
                 try:
-                    demo_app = Application(backend='uia').connect(title_re=f'.*{name_part}.*', timeout=2)
-                    demo_win = demo_app.window(title_re=f'.*{name_part}.*')
+                    demo_app, demo_win = session_connect(title_re=f'.*{name_part}.*', timeout=2)
                     for elem in demo_win.descendants():
                         try:
                             n = elem.element_info.name or ''
@@ -696,71 +1085,44 @@ class OutboundWorker:
                 pyautogui.click(scan_x, scan_y)
                 logger.info(f"Used proportional fallback for Scan/Upload at ({scan_x}, {scan_y})")
 
-            # ===== STEP 17: Wait for TWAIN popup =====
-            logger.info("[Step 17] Waiting for TWAIN popup...")
+            # ===== STEP 17: Close TWAIN popup =====
+            logger.info("[Step 17] Closing TWAIN popup...")
             self._update_overlay_step(17, 21, "Closing TWAIN popup...")
+            time.sleep(1.5)  # Let TWAIN popup appear
 
-            # Wait for TWAIN popup to appear (poll up to 10 seconds)
+            # The TWAIN popup X is inside a Chrome web view (not a UIA element).
+            # Click it relative to the 'Scan/Upload close dialog' Custom element.
             twain_closed = False
-            for attempt in range(50):  # 50 * 0.2s = 10 seconds max
+            for attempt in range(30):
                 try:
-                    desktop = Desktop(backend='uia')
-                    demo_win = None
-                    for w in desktop.windows():
+                    demo_app, demo_win = session_connect(title_re=f'.*{name_part}.*', timeout=2)
+                    for elem in demo_win.descendants():
                         try:
-                            if name_part.upper() in w.window_text().upper():
-                                demo_win = w
+                            ct = elem.element_info.control_type
+                            n = elem.element_info.name or ''
+                            if ct == 'Custom' and 'scan/upload' in n.lower():
+                                r = elem.rectangle()
+                                cw = r.right - r.left
+                                ch = r.bottom - r.top
+                                # Gray X is at 112.3% width, 15.3% height from Custom top-left
+                                x = r.left + int(cw * 1.123)
+                                y = r.top + int(ch * 0.153)
+                                pyautogui.click(x, y)
+                                twain_closed = True
+                                logger.info(f"Closed TWAIN popup via relative click at ({x}, {y})")
                                 break
                         except:
                             pass
-
-                    if demo_win:
-                        # Strategy 1: Find close/X button near the TWAIN element
-                        twain_elem = None
-                        for elem in demo_win.descendants():
-                            try:
-                                n = elem.element_info.name or ''
-                                if 'dynamic web twain' in n.lower():
-                                    twain_elem = elem
-                                    break
-                            except:
-                                pass
-
-                        if twain_elem:
-                            twain_rect = twain_elem.rectangle()
-                            # Look for a close/X button near the TWAIN popup
-                            close_found = False
-                            for elem in demo_win.descendants():
-                                try:
-                                    ct = elem.element_info.control_type
-                                    n = (elem.element_info.name or '').lower()
-                                    if ct == 'Button' and n in ('close', 'x', '\u2715', '\u2716', '\ue5cd'):
-                                        btn_rect = elem.rectangle()
-                                        # Must be near the TWAIN popup (within reasonable range)
-                                        if abs(btn_rect.top - twain_rect.top) < 150:
-                                            pyautogui.click((btn_rect.left + btn_rect.right) // 2, (btn_rect.top + btn_rect.bottom) // 2)
-                                            close_found = True
-                                            logger.info("Closed TWAIN popup via close button")
-                                            break
-                                except:
-                                    pass
-
-                            if not close_found:
-                                # Fallback: use proportional offset from TWAIN element
-                                # Close button is typically above-right of the popup title
-                                popup_width = twain_rect.right - twain_rect.left
-                                popup_height = twain_rect.bottom - twain_rect.top
-                                close_x = twain_rect.right + int(popup_width * 0.1)
-                                close_y = twain_rect.top - int(popup_height * 0.5)
-                                pyautogui.click(close_x, close_y)
-                                logger.info("Closed TWAIN popup via proportional offset")
-
-                            twain_closed = True
-
                     if twain_closed:
                         break
                 except:
                     pass
+                time.sleep(0.3)
+
+            if not twain_closed:
+                pyautogui.press('escape')
+                logger.info("Closed TWAIN popup via Escape key fallback")
+            time.sleep(0.2)
 
             # ===== STEP 18: Select Description dropdown =====
             logger.info("[Step 18] Selecting Mental/Behavioral...")

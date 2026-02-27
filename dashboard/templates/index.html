@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MHT Agentic - RDP Monitor</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>MHT Agentic</h1>
+            <span class="subtitle">RDP Session Monitor</span>
+        </div>
+        <div class="header-right">
+            <span id="bot-status" class="status-badge unknown">Checking...</span>
+            <span id="clock"></span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Stats Bar -->
+        <section class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-events">--</div>
+                <div class="stat-label">Events Today</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-inbound">--</div>
+                <div class="stat-label">Inbound</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-outbound">--</div>
+                <div class="stat-label">Outbound</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-errors">--</div>
+                <div class="stat-label">Errors</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-patients">--</div>
+                <div class="stat-label">Patients (File)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-avg-time">--</div>
+                <div class="stat-label">Avg Time (s)</div>
+            </div>
+        </section>
+
+        <!-- Bot Slots -->
+        <section class="slots-panel">
+            <h3>Bot Slots</h3>
+            <div class="slots-grid">
+                <div id="slot-experityb" class="slot-card slot-open">
+                    <div class="slot-name">EXPERITYB (inbound)</div>
+                    <div class="slot-status">Available</div>
+                    <div class="slot-meta"></div>
+                </div>
+                <div id="slot-experityd" class="slot-card slot-open">
+                    <div class="slot-name">EXPERITYD (inbound)</div>
+                    <div class="slot-status">Available</div>
+                    <div class="slot-meta"></div>
+                </div>
+                <div id="slot-experityc" class="slot-card slot-open">
+                    <div class="slot-name">EXPERITYC (outbound)</div>
+                    <div class="slot-status">Available</div>
+                    <div class="slot-meta"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Start-All Progress (hidden until start-all runs) -->
+        <section id="start-all-panel" class="start-all-panel" style="display:none;">
+            <h3>Start All Progress</h3>
+            <div id="start-all-bots" class="start-all-grid"></div>
+        </section>
+
+        <!-- Bot Error Log (hidden until errors exist) -->
+        <section id="bot-errors-panel" class="bot-errors-panel" style="display:none;">
+            <div class="errors-header">
+                <h3>Bot Login Errors</h3>
+                <span id="error-count-badge" class="error-count-badge">0</span>
+            </div>
+            <div id="bot-errors-list" class="bot-errors-list"></div>
+        </section>
+
+        <!-- RDP Controls -->
+        <section class="rdp-controls">
+            <div class="controls-left">
+                <h2>RDP Sessions</h2>
+            </div>
+            <div class="controls-right">
+                <button id="btn-start-all" class="btn btn-green" onclick="startAllRDP()">Start All</button>
+                <button id="btn-start-monitor" class="btn btn-blue" onclick="startMonitoring()">Start Monitoring</button>
+                <button id="btn-clear-db" class="btn btn-orange" onclick="clearDemoDB()">Clear Demo DB</button>
+                <button id="btn-stop-all" class="btn btn-red" onclick="stopAllRDP()">Stop All</button>
+            </div>
+        </section>
+
+        <!-- Session Cards -->
+        <section id="sessions-container" class="sessions-grid">
+            <div class="session-card placeholder">
+                <p>Searching for RDP sessions...</p>
+            </div>
+        </section>
+
+        <!-- Recent Events Table -->
+        <section class="events-section">
+            <h2>Recent Events</h2>
+            <div class="table-wrap">
+                <table id="events-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Time</th>
+                            <th>Dir</th>
+                            <th>Patient</th>
+                            <th>Status</th>
+                            <th>Errors</th>
+                        </tr>
+                    </thead>
+                    <tbody id="events-body">
+                        <tr><td colspan="6" class="empty">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <span>Last updated: <span id="last-update">--</span></span>
+    </footer>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

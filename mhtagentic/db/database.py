@@ -108,6 +108,39 @@ class MHTDatabase:
                 )
             """)
 
+            # Create bot_slot table for dynamic inbound/outbound assignment
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_slot (
+                    slot_name TEXT PRIMARY KEY,
+                    session_id INTEGER,
+                    claimed_at TEXT,
+                    heartbeat_at TEXT,
+                    status TEXT DEFAULT 'open'
+                )
+            """)
+
+            # Create bot_error_log table for tracking login/startup errors per bot
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_error_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot_name TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL DEFAULT 5,
+                    error TEXT NOT NULL,
+                    traceback TEXT,
+                    step TEXT,
+                    created_at DATETIME NOT NULL
+                )
+            """)
+
+            # Migrate old role-based slots to user-based slots
+            cursor.execute("DELETE FROM bot_slot WHERE slot_name IN ('inbound', 'outbound')")
+
+            # Seed per-user slot rows
+            cursor.execute("INSERT OR IGNORE INTO bot_slot (slot_name, status) VALUES ('experityb', 'open')")
+            cursor.execute("INSERT OR IGNORE INTO bot_slot (slot_name, status) VALUES ('experityc', 'open')")
+            cursor.execute("INSERT OR IGNORE INTO bot_slot (slot_name, status) VALUES ('experityd', 'open')")
+
             conn.commit()
         finally:
             conn.close()
@@ -298,3 +331,206 @@ class MHTDatabase:
             return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Standalone slot helpers (work with raw db_path, no MHTDatabase instance)
+# ---------------------------------------------------------------------------
+
+def claim_slot(db_path: Union[str, Path], preferred: str) -> Optional[str]:
+    """
+    Atomically claim a specific bot slot by name.
+
+    Args:
+        db_path: Path to SQLite database file.
+        preferred: The user-based slot name (e.g. 'experityb', 'experityc', 'experityd').
+
+    Returns:
+        Slot name if claimed, or None if not available.
+    """
+    import os
+    if not preferred:
+        return None
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        now = datetime.now().isoformat()
+        session_id = os.getpid()
+
+        conn.execute("BEGIN EXCLUSIVE")
+
+        row = conn.execute(
+            "SELECT status FROM bot_slot WHERE slot_name = ?", (preferred,)
+        ).fetchone()
+        if row and row[0] == "open":
+            conn.execute(
+                "UPDATE bot_slot SET status = 'active', session_id = ?, "
+                "claimed_at = ?, heartbeat_at = ? WHERE slot_name = ?",
+                (session_id, now, now, preferred),
+            )
+            conn.commit()
+            return preferred
+
+        conn.commit()
+        return None
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        conn.close()
+
+
+def release_slot(db_path: Union[str, Path], slot_name: str) -> None:
+    """Release a claimed slot back to 'open'."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        conn.execute(
+            "UPDATE bot_slot SET status = 'open', session_id = NULL, "
+            "claimed_at = NULL, heartbeat_at = NULL WHERE slot_name = ?",
+            (slot_name,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def heartbeat_slot(db_path: Union[str, Path], slot_name: str) -> None:
+    """Update the heartbeat timestamp for a claimed slot."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        now = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE bot_slot SET heartbeat_at = ? WHERE slot_name = ?",
+            (now, slot_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_slots(db_path: Union[str, Path]) -> List[Dict]:
+    """Return both slot rows for dashboard display."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT slot_name, session_id, claimed_at, heartbeat_at, status "
+            "FROM bot_slot ORDER BY slot_name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def cleanup_stale_slots(db_path: Union[str, Path], stale_seconds: int = 90) -> int:
+    """
+    Reset slots whose heartbeat is older than *stale_seconds* back to 'open'.
+
+    Returns:
+        Number of slots cleaned up.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        cutoff = datetime.now().isoformat()
+        # We compare ISO strings — works because they sort lexicographically
+        cursor = conn.execute(
+            "SELECT slot_name, heartbeat_at FROM bot_slot WHERE status = 'active'"
+        )
+        cleaned = 0
+        for row in cursor.fetchall():
+            hb = row[1]
+            if not hb:
+                continue
+            try:
+                hb_dt = datetime.fromisoformat(hb)
+                age = (datetime.now() - hb_dt).total_seconds()
+                if age > stale_seconds:
+                    conn.execute(
+                        "UPDATE bot_slot SET status = 'open', session_id = NULL, "
+                        "claimed_at = NULL, heartbeat_at = NULL WHERE slot_name = ?",
+                        (row[0],),
+                    )
+                    cleaned += 1
+            except (ValueError, TypeError):
+                pass
+        conn.commit()
+        return cleaned
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Bot error log helpers
+# ---------------------------------------------------------------------------
+
+def log_bot_error(
+    db_path: Union[str, Path],
+    slot_name: str,
+    attempt: int,
+    max_attempts: int,
+    error: str,
+    tb: str = "",
+    step: str = "",
+) -> int:
+    """Log a bot login/startup error attempt to the DB.
+
+    Returns:
+        The error log row ID.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        now = datetime.now().isoformat()
+        cur = conn.execute(
+            "INSERT INTO bot_error_log "
+            "(slot_name, attempt, max_attempts, error, traceback, step, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (slot_name, attempt, max_attempts, error, tb, step, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_bot_errors(
+    db_path: Union[str, Path], slot_name: str = None, limit: int = 50
+) -> List[Dict]:
+    """Return recent bot error log entries, optionally filtered by slot.
+
+    Returns:
+        List of error log dicts, newest first.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        if slot_name:
+            rows = conn.execute(
+                "SELECT * FROM bot_error_log WHERE slot_name = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (slot_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bot_error_log ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def clear_bot_errors(db_path: Union[str, Path]) -> int:
+    """Delete all bot error log entries. Called on stop-all / clear.
+
+    Returns:
+        Number of rows deleted.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        cur = conn.execute("DELETE FROM bot_error_log")
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

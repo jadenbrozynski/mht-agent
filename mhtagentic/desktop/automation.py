@@ -10,6 +10,10 @@ from typing import Optional, Tuple
 import pyautogui
 import pygetwindow as gw
 from PIL import Image
+from mhtagentic.desktop.session_guard import (
+    session_get_all_windows,
+    session_get_windows_with_title,
+)
 
 logger = logging.getLogger("mhtagentic.desktop")
 
@@ -40,7 +44,8 @@ class DesktopAutomation:
         self.shortcut_path = shortcut_path or self.EXPERITY_SHORTCUT
         self.custom_pattern = window_pattern
         self.window: Optional[gw.Window] = None
-        self.screenshot_dir = Path("output/screenshots")
+        from mhtagentic import OUTPUT_DIR
+        self.screenshot_dir = OUTPUT_DIR / "screenshots"
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
 
     def launch_experity(self, wait_seconds: int = 10) -> bool:
@@ -92,18 +97,29 @@ class DesktopAutomation:
         try:
             # First try custom pattern if set
             if self.custom_pattern:
-                windows = gw.getWindowsWithTitle(self.custom_pattern)
+                windows = session_get_windows_with_title(self.custom_pattern)
                 if windows:
                     self.window = windows[0]
                     logger.info(f"Found custom window: {self.window.title}")
                     return True
 
-            # Try Experity - must contain "Experity" in title
-            all_windows = gw.getAllWindows()
+            # Try Experity or Tracking Board - session-filtered first
+            all_windows = session_get_all_windows()
             for w in all_windows:
-                if "experity" in w.title.lower():
+                title_lower = w.title.lower()
+                if "experity" in title_lower or "tracking board" in title_lower:
                     self.window = w
                     logger.info(f"Found Experity window: {self.window.title}")
+                    return True
+
+            # Fallback: search ALL windows without session filtering
+            # (needed when running as SYSTEM via PsExec in an RDP session)
+            import pygetwindow as gw
+            for w in gw.getAllWindows():
+                title_lower = w.title.lower()
+                if "experity" in title_lower or "tracking board" in title_lower:
+                    self.window = w
+                    logger.info(f"Found Experity window (unfiltered): {self.window.title}")
                     return True
 
             return False
@@ -122,7 +138,7 @@ class DesktopAutomation:
         try:
             all_browser_windows = []
             for pattern in self.BROWSER_PATTERNS:
-                windows = gw.getWindowsWithTitle(pattern)
+                windows = session_get_windows_with_title(pattern)
                 all_browser_windows.extend(windows)
 
             if all_browser_windows:

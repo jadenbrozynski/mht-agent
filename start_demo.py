@@ -20,7 +20,14 @@ import sys
 import os
 import time
 import logging
+import ctypes
 from pathlib import Path
+
+# Enable DPI awareness FIRST before any GUI imports
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
 
 # Setup paths
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -39,8 +46,9 @@ from mhtagentic.desktop.control_overlay import ControlOverlay, reset_control_ove
 from mhtagentic.outbound.outbound_worker import OutboundWorker
 from mhtagentic.db.mht_simulator import MHTResponseSimulator
 
-# Database path
-DB_PATH = SCRIPT_DIR / "output" / "mht_data.db"
+# Database path — shared location writable by all users
+from mhtagentic import OUTPUT_DIR
+DB_PATH = OUTPUT_DIR / "mht_data.db"
 
 # Reset and create control overlay
 reset_control_overlay()

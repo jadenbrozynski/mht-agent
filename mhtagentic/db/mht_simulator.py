@@ -51,26 +51,56 @@ class MHTResponseSimulator:
         conn.row_factory = sqlite3.Row
         return conn
 
+    _assessment_counter = 0  # Alternates between GAD-7 and PHQ-9
+
     def _generate_mock_assessment(self, patient_data: dict) -> dict:
         """
-        Generate mock MHT assessment results.
-
-        Args:
-            patient_data: The converted patient data from inbound event
-
-        Returns:
-            Mock assessment response matching MHT format
+        Generate mock MHT assessment results (alternates GAD-7 / PHQ-9).
         """
         patient = patient_data.get('patient', {})
         patient_id = patient.get('patient_id', 'unknown')
         first_name = patient.get('patient_first_name', '')
         last_name = patient.get('patient_last_name', '')
+        inbound_location = patient_data.get('clinic_location', 'ATTALLA')
 
-        # Generate random but realistic PHQ-9 scores (0-3 each)
-        phq9_scores = [random.randint(0, 3) for _ in range(9)]
-        total_score = sum(phq9_scores)
+        # Alternate between GAD-7 and PHQ-9
+        MHTResponseSimulator._assessment_counter += 1
+        use_gad7 = (MHTResponseSimulator._assessment_counter % 2 == 1)
 
-        # Determine severity based on total score
+        if use_gad7:
+            assess_name = "GAD-7"
+            assess_type = "Anxiety Screening"
+            num_questions = 7
+            questions = [
+                "Feeling nervous, anxious or on edge",
+                "Not being able to stop or control worrying",
+                "Worrying too much about different things",
+                "Trouble relaxing",
+                "Being so restless that it is hard to sit still",
+                "Becoming easily annoyed or irritable",
+                "Feeling afraid as if something awful might happen",
+            ]
+            item_prefix = "GAD7"
+        else:
+            assess_name = "PHQ-9"
+            assess_type = "Depression Screening"
+            num_questions = 9
+            questions = [
+                "Little interest or pleasure in doing things",
+                "Feeling down, depressed, or hopeless",
+                "Trouble falling/staying asleep or sleeping too much",
+                "Feeling tired or having little energy",
+                "Poor appetite or overeating",
+                "Feeling bad about yourself",
+                "Trouble concentrating on things",
+                "Moving or speaking slowly/being fidgety",
+                "Thoughts of self-harm",
+            ]
+            item_prefix = "PHQ9"
+
+        scores = [random.randint(0, 3) for _ in range(num_questions)]
+        total_score = sum(scores)
+
         if total_score <= 4:
             severity = "Minimal"
         elif total_score <= 9:
@@ -82,36 +112,21 @@ class MHTResponseSimulator:
         else:
             severity = "Severe"
 
-        # Build assessment items array (PHQ-9 questions)
-        phq9_questions = [
-            "Little interest or pleasure in doing things",
-            "Feeling down, depressed, or hopeless",
-            "Trouble falling/staying asleep or sleeping too much",
-            "Feeling tired or having little energy",
-            "Poor appetite or overeating",
-            "Feeling bad about yourself",
-            "Trouble concentrating on things",
-            "Moving or speaking slowly/being fidgety",
-            "Thoughts of self-harm"
-        ]
-
         assessment_items = []
-        for i, (question, score) in enumerate(zip(phq9_questions, phq9_scores), 1):
+        for i, (question, score) in enumerate(zip(questions, scores), 1):
             assessment_items.append({
                 "assessment_item_id": 40 + i,
-                "assessment_item_name": f"PHQ-9 Q{i}",
+                "assessment_item_name": f"{assess_name} Q{i}",
                 "assessment_item_description": question,
                 "assessment_item_score": f"{score}.0",
                 "assessment_item_score_range": "0.00 - 3.00",
                 "assessment_item_legend_value": ["Not at all", "Several days", "More than half", "Nearly every day"][score],
-                "assessment_item_asset": f"PHQ9_{i}",
+                "assessment_item_asset": f"{item_prefix}_{i}",
                 "assessment_item_type": "Functional Impairment"
             })
 
-        # Mock PDF URL (in production this would be a real S3/blob URL)
         mock_pdf_url = f"https://mht-assessments.s3.amazonaws.com/reports/{patient_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
 
-        # Build the full response matching MHT format
         assessment_response = {
             "data": {
                 "Status": "Success",
@@ -119,8 +134,9 @@ class MHTResponseSimulator:
                     "protocol": "API",
                     "clinic_id": patient_data.get('clinic_id', 110),
                     "clinic_name": "Southern Immediate Care",
-                    "clinic_location": "SOUTHERN IMMEDIATE CARE - ATTALLA"
+                    "clinic_location": inbound_location
                 },
+                "clinic_location": inbound_location,
                 "patient": {
                     "patient_id": patient_id,
                     "patient_first_name": first_name,
@@ -134,14 +150,14 @@ class MHTResponseSimulator:
                 "assessment": [
                     {
                         "assessment_id": random.randint(1000000, 9999999),
-                        "assessment_name": "PHQ-9",
-                        "assessment_type": "Depression Screening",
+                        "assessment_name": assess_name,
+                        "assessment_type": assess_type,
                         "assessment_items": assessment_items,
                         "total_score_legend": severity,
                         "total_score_value": str(total_score),
                         "assessment_overall_legend_score": f"{total_score}.0",
                         "patient_score_legend_value": severity,
-                        "assessment_clinical_notes": f"Patient {first_name} {last_name} completed PHQ-9 screening. Total score: {total_score} ({severity}).",
+                        "assessment_clinical_notes": f"Patient {first_name} {last_name} completed {assess_name} screening. Total score: {total_score} ({severity}).",
                         "flagged_abnormal": total_score >= 10
                     }
                 ],
@@ -282,7 +298,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
 
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "output/mht_data.db"
+    from mhtagentic import OUTPUT_DIR
+    db_path = sys.argv[1] if len(sys.argv) > 1 else str(OUTPUT_DIR / "mht_data.db")
     delay = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 
     simulator = MHTResponseSimulator(db_path, response_delay_seconds=delay)

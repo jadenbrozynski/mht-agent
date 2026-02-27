@@ -163,7 +163,8 @@ class AnalyticsEngine:
 
     def __init__(self, data_dir: Optional[Path] = None):
         """Initialize analytics engine."""
-        self.data_dir = data_dir or Path("output/analytics")
+        from mhtagentic import OUTPUT_DIR
+        self.data_dir = data_dir or (OUTPUT_DIR / "analytics")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # Current session tracking
