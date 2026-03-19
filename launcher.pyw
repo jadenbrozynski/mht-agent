@@ -160,164 +160,6 @@ def show_target(x, y, label, color="#FF6B6B", width=250, height=45, duration=1.5
     return overlay
 
 
-def save_debug():
-    """Save screenshot and logs for debugging."""
-    global _automation, _control
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    debug_file = _debug_dir / f"debug_{timestamp}"
-
-    try:
-        import pyautogui
-        screenshot = pyautogui.screenshot()
-        screenshot.save(f"{debug_file}_screen.png")
-    except:
-        pass
-
-    if _control:
-        logs = _control.get_logs()
-        with open(f"{debug_file}_logs.txt", "w") as f:
-            f.write(f"MHT Agentic Debug Log\n")
-            f.write(f"Timestamp: {timestamp}\n")
-            f.write(f"=" * 50 + "\n\n")
-            for log in logs:
-                f.write(log + "\n")
-        _control.set_step(f"Debug saved: debug_{timestamp}")
-
-
-def toggle_recording():
-    """Toggle macro recording on/off."""
-    global _recorder, _control
-
-    try:
-        from mhtagentic.desktop.macro_recorder import MacroRecorder
-    except ImportError:
-        _control.set_step("pynput not installed!")
-        return
-
-    if _recorder is None:
-        _recorder = MacroRecorder(on_action=lambda msg: _control.set_step(msg) if _control else None)
-
-    if _control.is_recording:
-        # Start recording
-        _recorder.start_recording()
-        _control.add_log("Macro recording STARTED")
-    else:
-        # Stop recording
-        _recorder.stop_recording()
-        _control.add_log("Macro recording STOPPED and saved")
-
-
-def run_silent():
-    """Run MHT Agentic silently - auto-launches Experity and runs saved macro."""
-    global _automation, _control
-
-    reset_control_overlay()
-
-    _should_exit = False
-
-    def on_kill():
-        nonlocal _should_exit
-        _should_exit = True
-
-    _control = ControlOverlay(
-        on_kill=on_kill,
-        on_debug=save_debug,
-        on_record=toggle_recording
-    )
-    _control.start()
-    time.sleep(0.3)
-
-    try:
-        # Launch Experity immediately
-        _control.set_status("Launching")
-        _control.set_step("Opening Experity EMR...")
-        _control.add_log("Launching Experity EMR...")
-
-        _automation = DesktopAutomation()
-        launched = _automation.launch_experity(wait_seconds=120)
-
-        if _should_exit:
-            _control.stop()
-            return
-
-        if not launched:
-            _control.add_log("Launch returned False, searching for window...")
-            if not _automation.find_experity_window():
-                _control.set_status("Error")
-                _control.set_step("Could not find Experity window")
-                _control.add_log("ERROR: Could not find Experity window")
-                time.sleep(3)
-                _control.stop()
-                return
-
-        _control.set_status("Connected")
-        _control.set_step("Found Experity window")
-        _control.add_log("Experity window found")
-
-        region = _automation.get_window_region()
-        if region:
-            _control.add_log(f"Window region: {region}")
-
-        # Auto-run fast login
-        try:
-            _control.add_log("Starting fast login")
-        except:
-            pass
-        print("Starting fast login")
-
-        time.sleep(0.5)
-        _fast_login(_control)
-
-        try:
-            _control.set_step("Click Continue to close")
-            _control.add_log("Flow completed - click Continue to close")
-            _control.enable_proceed()
-            _control.wait_for_proceed(timeout=300)  # Wait up to 5 minutes
-        except:
-            print("Flow completed")
-            time.sleep(10)  # Give user time to see result
-
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        try:
-            _control.set_status("Error")
-            _control.set_step(str(e)[:50])
-            _control.add_log(f"ERROR: {str(e)}")
-            import traceback
-            _control.add_log(traceback.format_exc())
-            _control.enable_proceed()
-            _control.wait_for_proceed(timeout=300)  # Wait so user can see error
-        except:
-            import traceback
-            print(traceback.format_exc())
-            time.sleep(10)
-
-    finally:
-        try:
-            _control.stop()
-        except:
-            pass
-
-
-# Credentials from environment (set in .env or system environment variables)
-STORED_USERNAME = os.environ.get("EXPERITY_USERNAME", "")
-STORED_PASSWORD = os.environ.get("EXPERITY_PASSWORD", "")
-
-
-def _show_element_overlay(element, label, color="#2196F3", duration=1.0):
-    """Show an overlay over a pywinauto element."""
-    try:
-        rect = element.rectangle()
-        center_x = (rect.left + rect.right) // 2
-        center_y = (rect.top + rect.bottom) // 2
-        width = rect.right - rect.left + 20
-        height = rect.bottom - rect.top + 10
-        show_target(center_x, center_y, label, color=color, width=width, height=height, duration=duration)
-    except:
-        pass
-
-
 def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     """Start monitoring the Waiting Room with periodic refresh and patient tracking."""
     import pyautogui
@@ -341,7 +183,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                elements = findwindows.find_elements(title_re=title_re, backend='uia')
+                elements = _sfind(title_re=title_re, backend='uia')
                 if elements:
                     app = Application(backend='uia').connect(handle=elements[0].handle, timeout=1)
                     return app.window(handle=elements[0].handle)
@@ -355,7 +197,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                elements = findwindows.find_elements(title_re=title_re, backend='uia')
+                elements = _sfind(title_re=title_re, backend='uia')
                 if not elements:
                     return True
             except:
@@ -590,24 +432,34 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     error_monitor_running = True
 
     def background_error_monitor():
-        """Background thread that continuously monitors for error popups."""
+        """Background thread that continuously monitors for error and birthday popups."""
         from pywinauto import Desktop
+        _popup_titles = ('Application Error', 'Error', 'Birthday', 'Experity', 'PROD')
+        _popup_buttons = ('OK', 'Ok', 'Close', 'Yes', 'Continue', 'Accept')
         while error_monitor_running and not control.is_killed:
             try:
                 desktop = Desktop(backend='uia')
-                windows = desktop.windows()
-                for w in windows:
+                for w in desktop.windows():
                     try:
                         title = w.window_text()
-                        if 'Application Error' in title or 'Error' == title:
-                            # Found error popup - click OK
+                        if not title:
+                            continue
+                        # Match error popups and birthday modals
+                        if any(kw in title for kw in _popup_titles) or 'Error' == title:
+                            # Skip the main Tracking Board / chart windows
+                            if 'Tracking Board' in title and 'Birthday' not in title:
+                                continue
                             buttons = w.descendants(control_type='Button')
                             for btn in buttons:
-                                if btn.window_text() in ['OK', 'Ok', 'Close']:
-                                    btn.click_input()
-                                    control.add_log(f"[ERROR MONITOR] Auto-dismissed: {title[:30]}")
-                                    time.sleep(0.3)
-                                    break
+                                try:
+                                    bt = btn.window_text()
+                                    if bt in _popup_buttons:
+                                        btn.click_input()
+                                        control.add_log(f"[POPUP MONITOR] Auto-dismissed '{title[:40]}' via [{bt}]")
+                                        time.sleep(0.3)
+                                        break
+                                except:
+                                    continue
                     except:
                         continue
             except:
@@ -896,6 +748,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     # We retry patiently instead of failing immediately
     control.set_step("Connecting to Experity...")
     from pywinauto import findwindows
+    try:
+        from mhtagentic.desktop.session_guard import session_find_elements as _sfind
+    except ImportError:
+        _sfind = findwindows.find_elements
 
     app = None
     win = None
@@ -909,7 +765,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
         try:
             # Try to connect to main Tracking Board (not Setup)
-            elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+            elements = _sfind(title_re='.*Tracking Board.*', backend='uia')
             # Find the one that's NOT "Setup"
             target_handle = None
             for elem in elements:
@@ -924,12 +780,14 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         except Exception as e1:
             pass
 
-        # Try Experity window as fallback
+        # Try Experity window as fallback (session-safe)
         try:
-            app = Application(backend='uia').connect(title_re='.*Experity.*', found_index=0, timeout=3)
-            win = app.window(title_re='.*Experity.*', found_index=0)
-            control.add_log("Connected to Experity window!")
-            break
+            _exp_elems = _sfind(title_re='.*Experity.*', backend='uia')
+            if _exp_elems:
+                app = Application(backend='uia').connect(handle=_exp_elems[0].handle, timeout=3)
+                win = app.window(handle=_exp_elems[0].handle)
+                control.add_log("Connected to Experity window!")
+                break
         except Exception as e2:
             pass
 
@@ -988,13 +846,13 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     demo_extracted_overlay = None
 
     if demo_mode:
-        # === DEMO MODE: Minimal overlays ===
+        # === DEMO MODE: Headless — no overlays, just scrape ===
         control.hide()
 
         demo_status_overlay = DemoStatusOverlay()
         demo_status_overlay.start()
-        demo_extracted_overlay = DemoExtractedDataOverlay()
-        demo_extracted_overlay.start()
+        # No extracted data overlay — run silent
+        demo_extracted_overlay = None
 
         # Initialize all overlay variables to None so monitoring loop references work
         patient_log_root = patient_log_text = cycle_label = None
@@ -1016,7 +874,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             pass  # No patient log in demo mode
 
         def update_extracted_data(patient_data):
-            demo_extracted_overlay.add_patient(patient_data)
+            pass  # No visual overlay — data goes to DB only
 
         def update_roomed(message):
             pass
@@ -2357,7 +2215,11 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         # Click and get data
         data = click_qualified_patient(patient)
 
-        if data:
+        # Only count as successfully processed if we got real demographic data
+        # (not just {'name': ..., 'clicked': True} from a failed extraction)
+        has_real_data = data and (data.get('dob') or data.get('first_name') or data.get('last_name'))
+
+        if has_real_data:
             # Record extraction duration
             data['_extract_seconds'] = round(time.time() - _extract_start, 1)
             processed_patients.add(name)
@@ -2380,7 +2242,8 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
             return data
 
-        # Failed
+        # Failed — do NOT add to processed_patients so bot retries next cycle
+        control.add_log(f"Extraction failed for {name} - will retry next cycle")
         analytics.end_patient_processing(ProcessingResult.FAILED)
         return None
 
@@ -2710,6 +2573,17 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             # === CLEAR STALE OVERLAYS BEFORE RESCAN ===
             clear_patient_overlays()
 
+            # === VERIFY TRACKING BOARD DATA IS LOADED ===
+            # On first cycle or after refresh, the UI elements may not be rendered yet
+            _tb_ready_deadline = time.time() + 3
+            while time.time() < _tb_ready_deadline:
+                try:
+                    _rp = win.child_window(title_re='.*Roomed Patients.*', control_type='Group')
+                    _rp.descendants(control_type='DataItem')
+                    break  # Group exists and is queryable
+                except:
+                    time.sleep(0.15)
+
             # === PRIORITIZE: ROOMED PATIENTS FIRST ===
             # Check for unprocessed roomed patients before looking at waiting room
             current_roomed = find_roomed_patients()
@@ -2838,7 +2712,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                 try:
                     # Reconnect to tracking board for roomed patient processing
                     from pywinauto import findwindows
-                    elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+                    elements = _sfind(title_re='.*Tracking Board.*', backend='uia')
                     target_handle = None
                     for elem in elements:
                         if 'Setup' not in elem.name:
@@ -2914,6 +2788,36 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     break
                 time.sleep(0.1)
 
+            # Wait for tracking board data to actually reload after refresh
+            # Poll for Waiting Room group to have DataItem children (patients rendered)
+            _reload_deadline = time.time() + 4  # up to 4 seconds
+            _data_loaded = False
+            while time.time() < _reload_deadline:
+                try:
+                    _wr = win.child_window(title_re='.*Waiting Room.*', control_type='Group')
+                    _items = _wr.descendants(control_type='DataItem')
+                    if len(_items) > 0:
+                        _data_loaded = True
+                        break
+                except:
+                    pass
+                time.sleep(0.15)
+
+            if not _data_loaded:
+                # Waiting room might genuinely be empty, or still loading — try one more refresh
+                control.add_log("Tracking board data not ready after refresh - retrying...")
+                pyautogui.click(REFRESH_X, REFRESH_Y)
+                _retry_deadline = time.time() + 3
+                while time.time() < _retry_deadline:
+                    try:
+                        _wr = win.child_window(title_re='.*Waiting Room.*', control_type='Group')
+                        _items = _wr.descendants(control_type='DataItem')
+                        if len(_items) > 0:
+                            break
+                    except:
+                        pass
+                    time.sleep(0.15)
+
             control.add_log("Refresh complete")
 
     except Exception as e:
@@ -2968,10 +2872,14 @@ def _change_location(control, target_location="ATTALLA"):
     """
     import pyautogui
     from pywinauto import Application, findwindows
+    try:
+        from mhtagentic.desktop.session_guard import session_find_elements as _sfind
+    except ImportError:
+        _sfind = findwindows.find_elements
 
     try:
         # Connect to the Tracking Board / Experity window
-        elements = findwindows.find_elements(title_re='.*Tracking Board.*', backend='uia')
+        elements = _sfind(title_re='.*Tracking Board.*', backend='uia')
         target_handle = None
         for elem in elements:
             if 'Setup' not in elem.name:
@@ -3095,386 +3003,11 @@ def _change_location(control, target_location="ATTALLA"):
         control.add_log(f"Location change error: {str(e)}")
         return False
 
-
-def _fast_login(control):
-    """Fast login using pywinauto for Chromium-based Experity app."""
-    from pywinauto import Application
-    import pyautogui
-
-    control.set_status("Logging In")
-    control.set_step("Connecting to Experity...")
-    control.add_log("Starting login with pywinauto")
-
-    try:
-        # ===== SCREEN 1: Experity Username =====
-        control.add_log("Connecting to Experity window...")
-
-        app = Application(backend='uia').connect(title_re='.*Experity.*', found_index=0, timeout=10)
-        win = app.window(title_re='.*Experity.*', found_index=0)
-        control.add_log(f"Connected to: {win.window_text()}")
-
-        control.set_status("Logging In")
-        control.set_step("Entering username...")
-
-        # Find username field
-        edits = win.descendants(control_type='Edit')
-        control.add_log(f"Found {len(edits)} edit fields")
-
-        if edits:
-            username_edit = edits[0]
-
-            # Show overlay on username field
-            _show_element_overlay(username_edit, "USERNAME", color="#2196F3", duration=1.2)
-            time.sleep(0.8)
-
-            # Use clipboard paste for reliable input
-            import pyautogui
-            import pyperclip
-            username_edit.click_input()
-            time.sleep(0.2)
-            pyautogui.hotkey('ctrl', 'a')
-            time.sleep(0.1)
-            pyperclip.copy(STORED_USERNAME)
-            pyautogui.hotkey('ctrl', 'v')
-            control.add_log(f"Username entered: {STORED_USERNAME}")
-
-        # Click Next button
-        control.set_step("Clicking Next...")
-        buttons = win.descendants(control_type='Button')
-        for btn in buttons:
-            if 'Next' in btn.window_text():
-                # Show overlay on Next button
-                _show_element_overlay(btn, "NEXT", color="#4CAF50", duration=1.0)
-                time.sleep(0.6)
-
-                btn.click()
-                control.add_log("Clicked Next button")
-                break
-
-        # ===== Wait for Screen 2 (Okta) =====
-        control.set_status("Authenticating")
-        control.set_step("Waiting for sign in page...")
-        time.sleep(5)
-
-        # ===== SCREEN 2: Okta Password =====
-        control.add_log("Connecting to Okta Sign In window...")
-
-        app2 = Application(backend='uia').connect(title='Sign In', timeout=10)
-        win2 = app2.window(title='Sign In')
-        control.add_log(f"Connected to: {win2.window_text()}")
-
-        # Find edit fields
-        edits2 = win2.descendants(control_type='Edit')
-        control.add_log(f"Found {len(edits2)} edit fields on Okta")
-
-        # Check if username field needs to be filled
-        if len(edits2) >= 1:
-            username_edit2 = edits2[0]
-            current_username = ""
-            try:
-                current_username = username_edit2.get_value()
-            except:
-                try:
-                    current_username = username_edit2.window_text()
-                except:
-                    pass
-
-            control.add_log(f"Username field value: '{current_username}'")
-
-            # If username is empty or just placeholder, fill it
-            if not current_username or current_username.strip() == "" or "username" in current_username.lower():
-                control.set_step("Entering username...")
-                _show_element_overlay(username_edit2, "USERNAME", color="#2196F3", duration=1.2)
-                time.sleep(0.8)
-
-                username_edit2.click_input()
-                time.sleep(0.2)
-                pyautogui.hotkey('ctrl', 'a')
-                time.sleep(0.1)
-                pyperclip.copy(STORED_USERNAME)
-                pyautogui.hotkey('ctrl', 'v')
-                control.add_log(f"Username entered: {STORED_USERNAME}")
-                time.sleep(0.3)
-            else:
-                control.add_log("Username already filled, skipping")
-
-        # Password field
-        control.set_step("Entering password...")
-        if len(edits2) >= 2:
-            password_edit = edits2[1]
-
-            # Show overlay on password field
-            _show_element_overlay(password_edit, "PASSWORD", color="#FF9800", duration=1.2)
-            time.sleep(0.8)
-
-            # Use clipboard paste for reliable input
-            import pyautogui
-            import pyperclip
-            password_edit.click_input()
-            time.sleep(0.2)
-            pyautogui.hotkey('ctrl', 'a')
-            time.sleep(0.1)
-            pyperclip.copy(STORED_PASSWORD)
-            pyautogui.hotkey('ctrl', 'v')
-            control.add_log("Password entered")
-
-        # Click Sign In button
-        control.set_step("Clicking Sign In...")
-        buttons2 = win2.descendants(control_type='Button')
-        for btn in buttons2:
-            name = btn.window_text()
-            if name == 'Sign In':
-                # Show overlay on Sign In button
-                _show_element_overlay(btn, "SIGN IN", color="#4CAF50", duration=1.0)
-                time.sleep(0.6)
-
-                btn.click()
-                control.add_log("Clicked Sign In button")
-                break
-
-        # ===== SCREEN 3: OTP Verification (DEMO MODE) =====
-        control.set_status("Verification")
-        control.set_step("Waiting for SMS screen...")
-        control.add_log("Waiting 5 seconds for OTP screen to load...")
-        time.sleep(5)
-
-        control.set_step("Loading verification...")
-        control.add_log("Analyzing OTP verification screen...")
-
-        # Take screenshot for analysis
-        import pyautogui
-        otp_screenshot = pyautogui.screenshot()
-        otp_debug_path = SCRIPT_DIR / "output" / "debug" / "otp_screen.png"
-        otp_debug_path.parent.mkdir(parents=True, exist_ok=True)
-        otp_screenshot.save(otp_debug_path)
-        control.add_log(f"OTP screen captured: {otp_debug_path}")
-
-        # Reconnect to the window - try multiple title patterns
-        win3 = None
-        app3 = None
-
-        # Try different window title patterns
-        title_patterns = ['Sign In', '.*Sign.*', '.*Okta.*', '.*SMS.*', '.*Verify.*', '.*Authentication.*']
-
-        for pattern in title_patterns:
-            try:
-                control.add_log(f"Trying window pattern: {pattern}")
-                if '.*' in pattern:
-                    app3 = Application(backend='uia').connect(title_re=pattern, timeout=3)
-                    win3 = app3.window(title_re=pattern)
-                else:
-                    app3 = Application(backend='uia').connect(title=pattern, timeout=3)
-                    win3 = app3.window(title=pattern)
-                control.add_log(f"Connected to: {win3.window_text()}")
-                break
-            except Exception as e:
-                control.add_log(f"Pattern '{pattern}' failed: {str(e)[:30]}")
-                continue
-
-        if not win3:
-            control.set_status("OTP Error", "#dc3545")
-            control.set_step("Could not find OTP window!")
-            control.add_log("ERROR: Could not connect to OTP window with any pattern")
-            time.sleep(3)
-            return
-
-        try:
-            control.add_log("Connected to OTP screen")
-
-            # Log all buttons found for analysis
-            buttons3 = win3.descendants(control_type='Button')
-            control.add_log(f"Found {len(buttons3)} buttons on OTP screen:")
-            for btn in buttons3:
-                name = btn.window_text()
-                if name.strip():
-                    control.add_log(f"  - Button: '{name}'")
-
-            # Log all edit fields found
-            edits3 = win3.descendants(control_type='Edit')
-            control.add_log(f"Found {len(edits3)} edit fields on OTP screen")
-
-            # ===== Click Send code to request OTP =====
-            control.set_step("Found SMS authentication screen")
-            send_code_elem = None
-
-            # Send code is a Hyperlink, not a Button
-            try:
-                send_code_elem = win3.child_window(control_type='Hyperlink', title='Send code')
-                control.add_log(f"Found Send code hyperlink")
-            except:
-                control.add_log("Send code hyperlink not found with exact match, trying search...")
-                links = win3.descendants(control_type='Hyperlink')
-                for link in links:
-                    name = link.window_text()
-                    if 'send' in name.lower():
-                        send_code_elem = link
-                        control.add_log(f"Found Send code as Hyperlink: '{name}'")
-                        break
-
-            if send_code_elem:
-                _show_element_overlay(send_code_elem, "SEND CODE", color="#FF5722", duration=1.5)
-                time.sleep(1.0)
-                control.set_step("Requesting SMS code...")
-                send_code_elem.click_input()
-                control.add_log("Clicked Send code - SMS requested")
-                time.sleep(2.0)
-            else:
-                control.add_log("Send code not found - continuing anyway")
-                time.sleep(1)
-
-            # ===== Prompt user for OTP code =====
-            control.set_status("Enter Code")
-            control.set_step("Check your phone for SMS")
-            control.add_log("=== WAITING FOR OTP CODE INPUT ===")
-
-            # Prompt with 120 second timeout
-            otp_code = control.prompt_input("Enter OTP Code:", timeout=120)
-
-            if otp_code:
-                control.add_log(f"OTP received: {otp_code}")
-                control.set_status("Verifying")
-                control.set_step(f"Entering code: {otp_code}")
-
-                # Find OTP input field using exact match
-                try:
-                    otp_edit = win3.child_window(control_type='Edit', title_re='.*Enter Code.*')
-                    control.add_log("Found OTP input field")
-                except:
-                    otp_edit = edits3[0] if edits3 else None
-                    control.add_log("Using first edit field for OTP")
-
-                if otp_edit:
-                    # Show overlay on OTP input field
-                    _show_element_overlay(otp_edit, "ENTERING CODE", color="#2196F3", duration=1.5)
-                    time.sleep(1.0)
-
-                    # Use clipboard paste for reliable input
-                    import pyperclip
-                    otp_edit.click_input()
-                    time.sleep(0.2)
-                    pyautogui.hotkey('ctrl', 'a')
-                    time.sleep(0.1)
-                    pyperclip.copy(otp_code)
-                    pyautogui.hotkey('ctrl', 'v')
-                    control.add_log(f"OTP '{otp_code}' entered into field")
-                    time.sleep(0.5)
-                else:
-                    control.add_log("ERROR: OTP input field not found!")
-
-                # ===== Click Verify button =====
-                try:
-                    verify_btn = win3.child_window(control_type='Button', title='Verify')
-                    control.add_log("Found Verify button")
-                except:
-                    verify_btn = None
-                    for btn in buttons3:
-                        if btn.window_text() == 'Verify':
-                            verify_btn = btn
-                            break
-
-                if verify_btn:
-                    try:
-                        _show_element_overlay(verify_btn, "VERIFY", color="#4CAF50", duration=1.5)
-                        time.sleep(1.0)
-                    except:
-                        pass
-                    # Click FIRST, then update UI - so click always happens
-                    verify_rect = verify_btn.rectangle()
-                    verify_x = (verify_rect.left + verify_rect.right) // 2
-                    verify_y = (verify_rect.top + verify_rect.bottom) // 2
-                    pyautogui.click(verify_x, verify_y)
-                    print(f"Clicked Verify button at ({verify_x}, {verify_y})")
-                    try:
-                        control.set_step("Verifying code...")
-                        control.add_log(f"Clicked Verify button at ({verify_x}, {verify_y})")
-                    except:
-                        pass
-                    time.sleep(3.0)
-                else:
-                    try:
-                        control.add_log("Verify button not found")
-                    except:
-                        pass
-                    print("Verify button not found")
-
-                try:
-                    control.set_status("Loading")
-                    control.set_step("Waiting for EMR to load...")
-                    control.add_log("Login successful - waiting for EMR to fully load")
-                except:
-                    print("Login successful - waiting for EMR to fully load")
-
-                # Wait for Experity EMR to fully load after verification (90 seconds with countdown)
-                try:
-                    control.add_log("Waiting 90 seconds for EMR to fully load...")
-                except:
-                    pass
-                print("Waiting 90 seconds for EMR to fully load...")
-                for remaining in range(90, 0, -1):
-                    try:
-                        control.set_step(f"EMR loading... {remaining}s remaining")
-                    except:
-                        pass
-                    time.sleep(1)
-
-                # ===== CHANGE LOCATION =====
-                bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
-                try:
-                    control.set_status("Location")
-                    control.set_step(f"Changing to {bot_location}...")
-                    control.add_log(f"Starting location change to {bot_location}")
-                except:
-                    pass
-                print(f"Starting location change to {bot_location}")
-
-                _change_location(control, target_location=bot_location)
-
-                try:
-                    control.set_status("Success")
-                    control.set_step(f"Ready at {bot_location}!")
-                    control.add_log(f"Location changed to {bot_location} - starting monitoring")
-                except:
-                    pass
-                print(f"Location changed to {bot_location} - starting monitoring")
-
-                # Start monitoring the Waiting Room
-                time.sleep(1.0)
-                _start_monitoring(control)
-            else:
-                try:
-                    control.add_log("OTP input cancelled or timed out")
-                    control.set_status("Cancelled")
-                    control.set_step("No code entered")
-                except:
-                    pass
-                print("OTP input cancelled or timed out")
-
-        except Exception as otp_err:
-            print(f"OTP screen error: {str(otp_err)}")
-            try:
-                control.add_log(f"OTP screen error: {str(otp_err)}")
-                control.set_status("Error")
-                control.set_step(f"OTP error: {str(otp_err)[:30]}")
-            except:
-                pass
-
-    except Exception as e:
-        print(f"Login error: {str(e)}")
-        try:
-            control.set_status("Error")
-            control.set_step(f"Error: {str(e)[:40]}")
-            control.add_log(f"Login error: {str(e)}")
-            import traceback
-            control.add_log(f"Traceback: {traceback.format_exc()}")
-        except:
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-
-
 def run_monitor_only(mode="inbound"):
     """Run in monitor-only mode — skip launch/login, connect to existing Experity window.
 
-    Used by 'Start Monitoring' dashboard button when Experity is already open and logged in.
+    When launched by start_all_clean.py .bat chain, writes status codes 120-200
+    to the per-RDP status file for the orchestrator to track progress.
 
     Args:
         mode: "inbound" to monitor Waiting Room, "outbound" to process assessment results.
@@ -3483,8 +3016,102 @@ def run_monitor_only(mode="inbound"):
 
     print(f"[monitor-only] starting mode={mode}", flush=True)
 
-    print("[monitor-only] reset_control_overlay...", flush=True)
-    reset_control_overlay()
+    # --- Post-login status reporting setup ---
+    rdp_label = os.environ.get("MHT_RDP_LABEL", "")
+    bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
+    bot_role = os.environ.get("BOT_ROLE", "inbound")
+    status_file = Path(rf"C:\ProgramData\MHTAgentic\clean_status_{rdp_label}.txt") if rdp_label else None
+
+    def _post_status(code, msg=""):
+        if status_file:
+            status_file.write_text(f"{code} {msg}".strip())
+            print(f"[monitor-only] STATUS {code}: {msg}", flush=True)
+
+    # --- Phase 1: Wait for EMR / Tracking Board (status 120-130) ---
+    _post_status(120, "Waiting for Tracking Board")
+
+    # Show bottom-middle overlay immediately with role assignment
+    demo_overlay = DemoStatusOverlay()
+    demo_overlay.start()
+    role_label = "Outbound" if mode == "outbound" else "Inbound"
+    demo_overlay.update_status(inbound_text=f"{role_label} — Waiting for EMR...")
+
+    try:
+        import pyautogui
+        from pywinauto import findwindows, Application
+        try:
+            from mhtagentic.desktop.session_guard import session_find_elements
+        except ImportError:
+            session_find_elements = findwindows.find_elements
+
+        # Poll for Tracking Board window (up to 120s — EMR can be slow after login)
+        tb_found = False
+        for attempt in range(120):
+            elements = session_find_elements(title_re='.*Tracking Board.*', backend='uia')
+            if elements:
+                target_handle = None
+                for elem in elements:
+                    if 'Setup' not in elem.name:
+                        target_handle = elem.handle
+                        break
+                if target_handle:
+                    app = Application(backend='uia').connect(handle=target_handle, timeout=2)
+                    win = app.window(handle=target_handle)
+                    win_rect = win.rectangle()
+                    click_x = (win_rect.left + win_rect.right) // 2
+                    click_y = win_rect.top + 30
+                    pyautogui.click(click_x, click_y)
+                    print(f"[monitor-only] Tracking Board found, refocused at ({click_x}, {click_y})", flush=True)
+                    tb_found = True
+                    break
+            if attempt % 10 == 0 and attempt > 0:
+                print(f"[monitor-only] Still waiting for Tracking Board ({attempt}s)...", flush=True)
+            time.sleep(1)
+
+        if not tb_found:
+            _post_status(-1, "Tracking Board not found after 120s")
+            demo_overlay.update_status(inbound_text="ERROR: EMR not found")
+            time.sleep(5)
+            try:
+                demo_overlay.stop()
+            except Exception:
+                pass
+            return
+
+        _post_status(130, "EMR found")
+        demo_overlay.update_status(inbound_text="EMR found")
+
+    except Exception as emr_err:
+        _post_status(-1, f"EMR wait error: {emr_err}")
+        try:
+            demo_overlay.stop()
+        except Exception:
+            pass
+        raise
+
+    # --- Phase 2: Switch location (status 140-150) ---
+    _post_status(140, f"Switching to {bot_location}")
+    demo_overlay.update_status(inbound_text=f"Switching to {bot_location}...")
+
+    try:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(_change_location, demo_overlay, bot_location)
+            switch_ok = future.result(timeout=60)
+    except Exception as loc_err:
+        print(f"[monitor-only] Location switch error/timeout: {loc_err}", flush=True)
+        switch_ok = False
+
+    if switch_ok:
+        _post_status(150, f"Location: {bot_location}")
+        demo_overlay.update_status(inbound_text=f"Location: {bot_location}")
+    else:
+        print(f"[monitor-only] Location switch failed, continuing with current location", flush=True)
+        _post_status(150, f"Location switch skipped")
+
+    # --- Phase 3: Claim slot + signal orchestrator (status 160) ---
+    _post_status(160, "Location confirmed")
+    demo_overlay.update_status(inbound_text=f"Monitoring {bot_location}")
 
     _should_exit = False
 
@@ -3492,75 +3119,43 @@ def run_monitor_only(mode="inbound"):
         nonlocal _should_exit
         _should_exit = True
 
-    print("[monitor-only] creating ControlOverlay...", flush=True)
-    _control = ControlOverlay(
-        on_kill=on_kill,
-        on_debug=save_debug,
-        on_record=toggle_recording
-    )
-    print("[monitor-only] starting ControlOverlay...", flush=True)
-    _control.start()
-    print("[monitor-only] ControlOverlay started, sleeping 0.3s...", flush=True)
-    time.sleep(0.3)
+    # Use DemoStatusOverlay as _control for monitoring
+    print(f"[monitor-only] {mode}: keeping DemoStatusOverlay as _control", flush=True)
+    _control = demo_overlay
 
     try:
-        bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
         print(f"[monitor-only] bot_location={bot_location}", flush=True)
         try:
-            print("[monitor-only] calling set_status...", flush=True)
             _control.set_status("Connecting")
-            print("[monitor-only] calling set_step...", flush=True)
             _control.set_step(f"Finding Experity window ({mode})...")
-            print("[monitor-only] calling add_log...", flush=True)
             _control.add_log(f"Monitor-only mode={mode}, location={bot_location}")
-            print("[monitor-only] overlay updates done", flush=True)
         except Exception as overlay_err:
             print(f"[monitor-only] overlay error (non-fatal): {overlay_err}", flush=True)
 
         # Find existing Experity window (don't launch it)
-        print("[monitor-only] creating DesktopAutomation...", flush=True)
         _automation = DesktopAutomation()
-        print("[monitor-only] calling find_experity_window...", flush=True)
-
-        # Debug: list ALL windows visible to this process
-        try:
-            import pygetwindow as gw
-            all_wins = gw.getAllWindows()
-            print(f"[monitor-only] pygetwindow sees {len(all_wins)} windows:", flush=True)
-            for w in all_wins:
-                if w.title.strip():
-                    print(f"  - '{w.title}'", flush=True)
-        except Exception as gw_err:
-            print(f"[monitor-only] pygetwindow enum failed: {gw_err}", flush=True)
 
         if not _automation.find_experity_window():
             print("[monitor-only] Experity window NOT found!", flush=True)
             _control.set_status("Error")
             _control.set_step("Experity window not found")
-            _control.add_log("ERROR: Experity window not found — is it open?")
             time.sleep(5)
             _control.stop()
             return
         print(f"[monitor-only] Found Experity window: {_automation.window.title}", flush=True)
 
+        _post_status(200, "Monitoring active")
+
         _control.set_status("Connected")
         _control.set_step("Found Experity window")
         _control.add_log("Experity window found")
-
-        if _should_exit:
-            _control.stop()
-            return
-
-        # Skip location change — RDPs are already on the correct location
-        _control.add_log(f"Location: {bot_location} (already set)")
+        _control.add_log(f"Location: {bot_location}")
 
         if _should_exit:
             _control.stop()
             return
 
         if mode == "outbound":
-            # Pure outbound mode: simulator + outbound worker, NO patient scraping
-            # Configure logging so outbound_worker logger output goes to stdout
             logging.basicConfig(
                 level=logging.INFO,
                 format='[%(name)s] %(message)s',
@@ -3572,36 +3167,77 @@ def run_monitor_only(mode="inbound"):
             from mhtagentic import OUTPUT_DIR as _OUT_DIR
             db_path = str(_OUT_DIR / "mht_data.db")
 
-            # Start simulator — watches for inbound events, creates outbound events after delay
-            simulator = MHTResponseSimulator(db_path, response_delay_seconds=15)
+            simulator = MHTResponseSimulator(db_path, response_delay_seconds=0)
             simulator.start()
-            print("[outbound] MHT Simulator started (15s delay)", flush=True)
-            _control.add_log("Simulator started (15s delay)")
+            print("[outbound] MHT Simulator started (instant)", flush=True)
+            _control.add_log("Simulator started (instant)")
 
             worker = OutboundWorker(db_path, poll_interval=5.0, overlay=_control)
             _control.set_status("Outbound")
             _control.set_step("Waiting for outbound events...")
             _control.add_log(f"Outbound polling loop at {bot_location}")
             print("[monitor-only] entering outbound polling loop", flush=True)
+
+            # Find Refresh button on Tracking Board for periodic refresh
+            import pyautogui
+            from pywinauto.application import Application as _RefApp
+            _ob_refresh_x, _ob_refresh_y = None, None
+            try:
+                try:
+                    from mhtagentic.desktop.session_guard import session_find_elements as _ob_sfind
+                except ImportError:
+                    from pywinauto import findwindows
+                    _ob_sfind = findwindows.find_elements
+                _ob_elems = _ob_sfind(title_re='.*Tracking Board.*', backend='uia')
+                _ob_tb_handle = None
+                for _obe in _ob_elems:
+                    if 'Setup' not in _obe.name:
+                        _ob_tb_handle = _obe.handle
+                        break
+                if _ob_tb_handle:
+                    _tb_app = _RefApp(backend='uia').connect(handle=_ob_tb_handle, timeout=3)
+                    _tb_win = _tb_app.window(handle=_ob_tb_handle)
+                    _ref_btn = _tb_win.child_window(title='Refresh', control_type='Button')
+                    _ref_rect = _ref_btn.rectangle()
+                    _ob_refresh_x = (_ref_rect.left + _ref_rect.right) // 2
+                    _ob_refresh_y = (_ref_rect.top + _ref_rect.bottom) // 2
+                    print(f"[outbound] Refresh button at ({_ob_refresh_x}, {_ob_refresh_y})", flush=True)
+            except Exception as _ref_err:
+                print(f"[outbound] Could not find Refresh button: {_ref_err}", flush=True)
+
+            _OB_REFRESH_INTERVAL = 15
+            _ob_last_refresh = time.time()
+
             try:
                 while True:
                     try:
                         processed = worker.process_pending()
                         if processed > 0:
                             _control.set_step(f"Processed {processed} event(s)")
-                            _control.add_log(f"Outbound: processed {processed} event(s)")
                             print(f"[outbound] processed {processed} event(s)", flush=True)
+                            _ob_last_refresh = time.time()
                         else:
-                            _control.set_step("Waiting for outbound events...")
+                            # Periodic Tracking Board refresh (same as inbound)
+                            _now = time.time()
+                            _since = _now - _ob_last_refresh
+                            if _since >= _OB_REFRESH_INTERVAL and _ob_refresh_x:
+                                _control.set_step("Refreshing Tracking Board...")
+                                pyautogui.click(_ob_refresh_x, _ob_refresh_y)
+                                _ob_last_refresh = time.time()
+                                time.sleep(0.5)
+                                _control.set_step("Waiting for outbound events...")
+                                print("[outbound] Tracking Board refreshed", flush=True)
+                            else:
+                                _remaining = max(0, int(_OB_REFRESH_INTERVAL - _since))
+                                _control.set_step(f"Waiting for events... refresh in {_remaining}s")
                     except Exception as poll_err:
                         print(f"[outbound] poll error: {poll_err}", flush=True)
-                        _control.add_log(f"Poll error: {poll_err}")
                     time.sleep(5)
             finally:
                 simulator.stop()
                 print("[outbound] simulator stopped", flush=True)
         else:
-            # Inbound mode: monitor Waiting Room (demo_mode=True for overlays)
+            # Inbound mode: monitor Waiting Room
             _control.set_status("Monitoring")
             _control.set_step(f"Starting inbound ({bot_location})...")
             _control.add_log(f"Starting inbound monitoring at {bot_location}")
@@ -3652,18 +3288,6 @@ if __name__ == "__main__":
                 f.write(f"Error: {str(e)}\n")
                 f.write(f"Traceback:\n{traceback.format_exc()}\n")
     else:
-        try:
-            run_silent()
-        except Exception as e:
-            # Last resort error logging
-            import traceback
-            error_file = SCRIPT_DIR / "output" / "debug" / "crash_log.txt"
-            error_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(error_file, "w") as f:
-                f.write(f"CRASH LOG\n")
-                f.write(f"Error: {str(e)}\n")
-                f.write(f"Traceback:\n{traceback.format_exc()}\n")
-
-            # Show error in a simple message box
-            import tkinter.messagebox as mb
-            mb.showerror("MHT Agentic Crash", f"Script crashed!\n\nError: {str(e)}\n\nCheck: {error_file}")
+        # run_silent() DISABLED — use start_all_clean.py instead
+        print("[launcher] ERROR: run_silent() is disabled. Use start_all_clean.py (Start All) instead.", flush=True)
+        sys.exit(1)

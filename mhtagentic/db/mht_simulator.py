@@ -61,7 +61,12 @@ class MHTResponseSimulator:
         patient_id = patient.get('patient_id', 'unknown')
         first_name = patient.get('patient_first_name', '')
         last_name = patient.get('patient_last_name', '')
-        inbound_location = patient_data.get('clinic_location', 'ATTALLA')
+        # Location is empty at top-level (MHT API requirement), real value in _metadata
+        inbound_location = (
+            patient_data.get('clinic_location')
+            or patient_data.get('_metadata', {}).get('clinic_location')
+            or 'ATTALLA'
+        )
 
         # Alternate between GAD-7 and PHQ-9
         MHTResponseSimulator._assessment_counter += 1

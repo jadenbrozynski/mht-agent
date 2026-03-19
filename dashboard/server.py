@@ -212,10 +212,9 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
 
     @app.route("/api/slots")
     def api_slots():
-        """Return current bot slot status (auto-releases stale slots)."""
+        """Return current bot slot status (read-only, no auto-cleanup)."""
         if db_path.exists():
             try:
-                cleanup_stale_slots(str(db_path))
                 slots = get_slots(str(db_path))
             except Exception as e:
                 logger.error(f"Slot query failed: {e}")
@@ -284,527 +283,37 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
 
     @app.route("/api/rdp/start", methods=["POST"])
     def api_rdp_start():
-        """Start an RDP session from an .rdp file."""
-        data = request.get_json(silent=True) or {}
-        rdp_path = data.get("path", "")
-        if not rdp_path:
-            return jsonify({"success": False, "error": "No path provided"}), 400
-        result = start_rdp_session(rdp_path, project_root=project_root)
-        return jsonify(result)
-
-    MAX_LOGIN_ATTEMPTS = 5
-    SESSION_APPEAR_TIMEOUT = 120  # seconds: wait for new Windows session after mstsc opens
-    BOT_READY_TIMEOUT = 180      # seconds: wait for Google Auth + bot fully ready (signal file)
+        """Disabled — use Start All (start_all_clean.py) instead."""
+        return jsonify({"success": False, "error": "Use Start All instead"}), 400
 
     @app.route("/api/rdp/start-all", methods=["POST"])
     def api_rdp_start_all():
-        """Start exactly 3 RDP sessions: ExperityB → ExperityD → ExperityC.
-        Each gets a fresh logon (logoff first), startup task fires, OTP chained.
-        Retries each bot up to MAX_LOGIN_ATTEMPTS times before moving on.
-        Each attempt has 2-phase OTP wait: Task Scheduler (45s) → PsExec fallback (75s)."""
-        # Hardcoded launch order — exactly 3 sessions, no extras
-        desktop = Path.home() / "Desktop"
-        launch_order = [
-            {"username": "ExperityB", "path": str(desktop / "ExperityB_MHT.rdp"), "location": "ANNISTON"},
-            {"username": "ExperityD", "path": str(desktop / "ExperityD_MHT.rdp"), "location": "ATTALLA"},
-            {"username": "ExperityC", "path": str(desktop / "ExperityC_MHT.rdp"), "location": "ATTALLA"},
-        ]
+        """Just launch start_all_clean.py. It handles everything."""
+        import sys as _sys
+        import subprocess as _sp
 
-        # Verify all .rdp files exist
-        for entry in launch_order:
-            if not Path(entry["path"]).exists():
-                return jsonify({"success": False, "error": f"Missing: {entry['path']}"}), 400
+        script_path = project_root / "start_all_clean.py"
+        if not script_path.exists():
+            return jsonify({"success": False, "error": "start_all_clean.py not found"}), 404
 
-        # Prevent double-start
-        if _start_all_status.get("running"):
-            return jsonify({"success": False, "error": "Start All already in progress"}), 409
+        python_exe = Path(_sys.executable).parent / "python.exe"
+        if not python_exe.exists():
+            python_exe = Path(r"C:\Program Files\Python39\python.exe")
 
-        # Clear stale OTP signals before starting
-        clear_all_otp_signals()
+        log_file = Path(r"C:\ProgramData\MHTAgentic\start_all_clean.log")
 
-        # Clear previous error logs for a fresh session
-        if db_path.exists():
-            try:
-                clear_bot_errors(str(db_path))
-            except Exception:
-                pass
-
-        # Initialize status tracker + reset abort flag
-        _start_all_status["running"] = True
-        _start_all_status["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        _start_all_abort["abort"] = False
-        _start_all_status["bots"] = {}
-        for entry in launch_order:
-            _start_all_status["bots"][entry["username"]] = {
-                "status": "pending",
-                "attempt": 0,
-                "max_attempts": MAX_LOGIN_ATTEMPTS,
-                "error": "",
-                "step": "",
-            }
-
-        def _is_aborted():
-            """Check if stop-all has been triggered."""
-            return _start_all_abort.get("abort", False)
-
-        # Launch in a background thread so the HTTP response returns immediately
-        def _sequential_start():
-            import time as _time
-            import traceback as _tb
-
-            def _abortable_sleep(seconds: float):
-                """Sleep in 0.5s increments, checking abort flag each tick."""
-                deadline = _time.time() + seconds
-                while _time.time() < deadline:
-                    if _is_aborted():
-                        return
-                    _time.sleep(min(0.5, deadline - _time.time()))
-
-            def _wait_for_rdp_window_gone(target_username: str, timeout: int = 15):
-                """Wait until no mstsc window exists for target_username."""
-                deadline = _time.time() + timeout
-                while _time.time() < deadline:
-                    if _is_aborted():
-                        return True  # don't block on abort
-                    windows = find_rdp_windows()
-                    still_open = any(
-                        target_username.lower() in w["title"].lower()
-                        for w in windows
-                    )
-                    if not still_open:
-                        return True
-                    _time.sleep(1)
-                return False
-
-            # ── Step 0: Ensure scheduled tasks exist (auto-repair) ──
-            logger.info("[Start All] ========== STARTING ==========")
-            logger.info("[Start All] Verifying scheduled tasks...")
-            try:
-                task_result = ensure_autostart_task(project_root)
-                created = task_result.get("created", [])
-                if created:
-                    logger.info(f"[Start All] Created missing scheduled tasks: {created}")
-                    _abortable_sleep(3)
-                else:
-                    logger.info("[Start All] All scheduled tasks already exist")
-            except Exception as e:
-                logger.error(f"[Start All] ensure_autostart_task failed: {e}")
-
-            if _is_aborted():
-                logger.info("[Start All] ABORTED before pre-check")
-                _start_all_status["running"] = False
-                return
-
-            # ── Step 0b: Check which bots are already running healthy ──
-            already_running = set()
-            try:
-                slots = get_slots(str(db_path))
-                current_windows = find_rdp_windows()
-                logger.info(
-                    f"[Start All] Pre-check: {len(slots)} slots, "
-                    f"{len(current_windows)} RDP windows visible"
-                )
-                for s in slots:
-                    logger.info(
-                        f"[Start All]   Slot: {s['slot_name']} status={s['status']} "
-                        f"heartbeat={s.get('heartbeat_at')} session_id={s.get('session_id')}"
-                    )
-                for w in current_windows:
-                    logger.info(
-                        f"[Start All]   Window: hwnd={w['hwnd']} title='{w['title']}' "
-                        f"size={w['width']}x{w['height']}"
-                    )
-
-                for entry in launch_order:
-                    uname = entry["username"]
-                    slot_name = uname.lower()
-                    slot_info = next(
-                        (s for s in slots if s["slot_name"] == slot_name),
-                        None,
-                    )
-                    if slot_info and slot_info["status"] == "active" and slot_info.get("heartbeat_at"):
-                        from datetime import datetime
-                        try:
-                            hb = datetime.fromisoformat(slot_info["heartbeat_at"])
-                            age = (datetime.now() - hb).total_seconds()
-                            has_window = any(
-                                uname.lower() in w["title"].lower()
-                                for w in current_windows
-                            )
-                            logger.info(
-                                f"[Start All]   {uname}: slot=active, heartbeat_age={age:.0f}s, "
-                                f"has_window={has_window}"
-                            )
-                            if age < 60 and has_window:
-                                already_running.add(uname)
-                                logger.info(f"[Start All]   → SKIPPING {uname} (already healthy)")
-                            else:
-                                logger.info(
-                                    f"[Start All]   → NOT skipping {uname} "
-                                    f"(age={age:.0f}s, window={has_window})"
-                                )
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"[Start All]   {uname}: heartbeat parse error: {e}")
-                    else:
-                        status = slot_info["status"] if slot_info else "no_slot"
-                        logger.info(f"[Start All]   {uname}: slot={status} — will launch")
-            except Exception as e:
-                logger.error(f"[Start All] Pre-check for running bots failed: {e}")
-
-            logger.info(f"[Start All] Already running (will skip): {already_running or 'none'}")
-            logger.info(f"[Start All] Launch order: {[e['username'] for e in launch_order]}")
-
-            for i, entry in enumerate(launch_order):
-                if _is_aborted():
-                    logger.info("[Start All] ABORTED between bots")
-                    for remaining in launch_order[i:]:
-                        rname = remaining["username"]
-                        if rname in _start_all_status["bots"]:
-                            _start_all_status["bots"][rname]["status"] = "aborted"
-                            _start_all_status["bots"][rname]["error"] = "Cancelled by Stop All"
-                    break
-
-                username = entry["username"]
-                rdp_path = entry["path"]
-                slot_name = username.lower()
-                bot_status = _start_all_status["bots"][username]
-
-                logger.info(f"[Start All] ── Bot {i+1}/3: {username} ──")
-
-                # Skip bots that are already running healthy
-                if username in already_running:
-                    bot_status["status"] = "running"
-                    bot_status["step"] = "already_running"
-                    bot_status["attempt"] = 0
-                    bot_status["error"] = ""
-                    logger.info(f"[Start All] {username} → skipped (already running)")
-                    continue
-
-                login_success = False
-
-                for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
-                    if _is_aborted():
-                        logger.info(f"[Start All] {username} ABORTED at attempt {attempt}")
-                        bot_status["status"] = "aborted"
-                        bot_status["error"] = "Cancelled by Stop All"
-                        login_success = True  # prevent "failed" status
-                        break
-
-                    bot_status["attempt"] = attempt
-                    bot_status["status"] = "starting"
-                    bot_status["step"] = "logoff"
-                    bot_status["error"] = ""
-
-                    logger.info(
-                        f"[Start All] {username} — attempt {attempt}/{MAX_LOGIN_ATTEMPTS}"
-                    )
-
-                    try:
-                        # 1. Log off any existing session
-                        bot_status["step"] = "logoff"
-                        logger.info(f"[Start All] {username}: logging off existing session...")
-                        _logoff_rdp_user(username)
-
-                        if _is_aborted(): break
-
-                        # 3. Wait for the old RDP window to close
-                        bot_status["step"] = "wait_window_close"
-                        logger.info(f"[Start All] {username}: waiting for old window to close...")
-                        gone = _wait_for_rdp_window_gone(username, timeout=15)
-                        if not gone:
-                            logger.warning(f"[Start All] {username}: old window didn't close in 15s")
-                        else:
-                            logger.info(f"[Start All] {username}: old window closed")
-                        _abortable_sleep(2)
-
-                        if _is_aborted(): break
-
-                        # 4. Clear OTP signal
-                        signal_path = Path(r"C:\ProgramData\MHTAgentic\session_status") / f"{username}_otp_complete"
-                        try:
-                            signal_path.unlink(missing_ok=True)
-                            logger.info(f"[Start All] {username}: cleared OTP signal")
-                        except Exception:
-                            pass
-
-                        # 5. Snapshot existing session IDs BEFORE opening mstsc
-                        #    so we can detect the NEW session that appears after.
-                        #    (WTS may report wrong username during Google Auth,
-                        #    so we match by "new session ID" not by username)
-                        pre_session_ids = set(
-                            s["session_id"] for s in _find_rdp_session_ids()
-                        )
-                        logger.info(
-                            f"[Start All] {username}: existing session IDs before open: "
-                            f"{pre_session_ids}"
-                        )
-
-                        # Open the RDP connection
-                        bot_status["step"] = "rdp_connect"
-                        logger.info(f"[Start All] {username}: opening RDP from {rdp_path}...")
-                        result = start_rdp_session(rdp_path, project_root=project_root)
-                        if not result.get("success"):
-                            raise RuntimeError(
-                                f"mstsc.exe failed to launch: {result.get('error', 'unknown')}"
-                            )
-                        logger.info(f"[Start All] {username}: mstsc started (pid={result.get('pid')})")
-
-                        if _is_aborted(): break
-
-                        # 6. Wait for a NEW Windows session to appear
-                        #    (one that wasn't in the pre-snapshot).
-                        bot_status["step"] = "wait_session"
-                        logger.info(
-                            f"[Start All] {username}: waiting up to "
-                            f"{SESSION_APPEAR_TIMEOUT}s for NEW session "
-                            f"(ignoring existing: {pre_session_ids})..."
-                        )
-
-                        sid = None
-                        _wait_deadline = _time.time() + SESSION_APPEAR_TIMEOUT
-                        _poll_n = 0
-                        while _time.time() < _wait_deadline:
-                            if _is_aborted(): break
-                            all_sessions = _find_rdp_session_ids()
-                            new_sessions = [
-                                s for s in all_sessions
-                                if s["session_id"] not in pre_session_ids
-                            ]
-                            _poll_n += 1
-                            if _poll_n <= 3 or _poll_n % 5 == 0:
-                                logger.info(
-                                    f"[Start All] {username}: poll #{_poll_n} — "
-                                    f"all={[(s['username'], s['session_id']) for s in all_sessions]}, "
-                                    f"new={[(s['username'], s['session_id']) for s in new_sessions]}"
-                                )
-                            if new_sessions:
-                                sid = new_sessions[0]["session_id"]
-                                logger.info(
-                                    f"[Start All] {username}: NEW session found! "
-                                    f"session_id={sid} (WTS user={new_sessions[0]['username']})"
-                                )
-                                break
-                            _time.sleep(2)
-
-                        if _is_aborted(): break
-
-                        if sid is None:
-                            all_sessions = _find_rdp_session_ids()
-                            all_windows = find_rdp_windows()
-                            logger.error(
-                                f"[Start All] {username}: NO NEW SESSION! "
-                                f"All sessions: {[(s['username'], s['session_id']) for s in all_sessions]}, "
-                                f"All windows: {[(w['title'], w['hwnd']) for w in all_windows]}, "
-                                f"Pre-existing IDs: {pre_session_ids}"
-                            )
-                            raise RuntimeError(
-                                f"No new Windows session appeared for {username} "
-                                f"after {SESSION_APPEAR_TIMEOUT}s — RDP may have "
-                                f"failed to connect or needs manual credential entry."
-                            )
-
-                        # 7. PsExec inject the bot into this session.
-                        #    Task Scheduler may also start a bot on first logon —
-                        #    that's fine, whichever claims the slot first wins.
-                        #    For 2nd/3rd RDP (same account), Task Scheduler
-                        #    won't fire, so PsExec is the only way.
-                        bot_status["step"] = "inject_bot"
-                        logger.info(
-                            f"[Start All] {username}: session {sid} found. "
-                            f"Injecting bot via PsExec (FORCE_BOT_USER={username})..."
-                        )
-                        launch_result = launch_bot_in_session(
-                            sid, project_root, username=username,
-                            location=entry.get("location", "ATTALLA")
-                        )
-                        logger.info(
-                            f"[Start All] {username}: PsExec result: {launch_result}"
-                        )
-
-                        if _is_aborted(): break
-
-                        # 8. Wait for bot to become ready.
-                        #    Check signal file AND DB slot — either means success.
-                        #    Task Scheduler bot may claim slot for first session,
-                        #    PsExec bot claims slot for subsequent sessions.
-                        bot_status["step"] = "wait_bot_ready"
-                        signal_file = Path(r"C:\ProgramData\MHTAgentic\session_status") / f"{username}_otp_complete"
-                        logger.info(
-                            f"[Start All] {username}: waiting up to {BOT_READY_TIMEOUT}s "
-                            f"for bot ready (signal file OR DB slot)..."
-                        )
-                        _otp_deadline = _time.time() + BOT_READY_TIMEOUT
-                        otp_ok = False
-                        _otp_poll = 0
-                        while _time.time() < _otp_deadline:
-                            if _is_aborted(): break
-                            _otp_poll += 1
-
-                            # Check 1: OTP signal file
-                            if signal_file.exists():
-                                logger.info(
-                                    f"[Start All] {username}: OTP signal FILE "
-                                    f"found after {_otp_poll * 3}s!"
-                                )
-                                otp_ok = True
-                                break
-
-                            # Check 2: DB slot active
-                            try:
-                                _diag = get_slots(str(db_path))
-                                slot_info = next(
-                                    (s for s in _diag if s["slot_name"] == slot_name),
-                                    None,
-                                )
-                                if slot_info and slot_info["status"] == "active":
-                                    logger.info(
-                                        f"[Start All] {username}: DB slot ACTIVE "
-                                        f"after {_otp_poll * 3}s "
-                                        f"(PID={slot_info.get('session_id')})"
-                                    )
-                                    otp_ok = True
-                                    break
-                            except Exception:
-                                pass
-
-                            if _otp_poll % 10 == 0:
-                                slot_st = "?"
-                                try:
-                                    _diag = get_slots(str(db_path))
-                                    slot_st = next(
-                                        (s["status"] for s in _diag if s["slot_name"] == slot_name),
-                                        "?"
-                                    )
-                                except Exception:
-                                    pass
-                                logger.info(
-                                    f"[Start All] {username}: still waiting "
-                                    f"({_otp_poll * 3}s elapsed, slot={slot_st}, "
-                                    f"signal_file={signal_file.exists()})..."
-                                )
-                            _time.sleep(3)
-
-                        if _is_aborted(): break
-
-                        if otp_ok:
-                            bot_status["status"] = "running"
-                            bot_status["step"] = "complete"
-                            bot_status["error"] = ""
-                            logger.info(
-                                f"[Start All] {username}: ✓ BOT READY "
-                                f"(attempt {attempt}, session {sid})"
-                            )
-                            login_success = True
-                            break
-                        else:
-                            diag_slots = get_slots(str(db_path))
-                            diag_sessions = _find_rdp_session_ids()
-                            logger.error(
-                                f"[Start All] {username}: bot NOT ready after {BOT_READY_TIMEOUT}s! "
-                                f"Signal: {signal_file.exists()}, "
-                                f"Slots: {[(s['slot_name'], s['status']) for s in diag_slots]}, "
-                                f"Sessions: {[(s['username'], s['session_id']) for s in diag_sessions]}"
-                            )
-                            raise RuntimeError(
-                                f"Bot did not become active after {BOT_READY_TIMEOUT}s. "
-                                f"Task Scheduler may not have started the bot."
-                            )
-
-                    except Exception as exc:
-                        # If aborted, don't log errors or retry — just bail
-                        if _is_aborted():
-                            logger.info(f"[Start All] {username}: aborted during exception handler")
-                            bot_status["status"] = "aborted"
-                            bot_status["error"] = "Cancelled by Stop All"
-                            login_success = True
-                            break
-
-                        error_msg = str(exc)
-                        tb_str = _tb.format_exc()
-                        step = bot_status.get("step", "unknown")
-
-                        logger.error(
-                            f"[Start All] {username} — attempt {attempt}/{MAX_LOGIN_ATTEMPTS} "
-                            f"FAILED at step '{step}': {error_msg}"
-                        )
-                        logger.error(f"[Start All] {username} — traceback:\n{tb_str}")
-
-                        # Only log to DB if not aborted
-                        if not _is_aborted():
-                            try:
-                                log_bot_error(
-                                    str(db_path),
-                                    slot_name=slot_name,
-                                    attempt=attempt,
-                                    max_attempts=MAX_LOGIN_ATTEMPTS,
-                                    error=error_msg,
-                                    tb=tb_str,
-                                    step=step,
-                                )
-                            except Exception as db_exc:
-                                logger.error(f"Failed to log bot error to DB: {db_exc}")
-
-                        bot_status["error"] = error_msg
-                        bot_status["status"] = (
-                            "retrying" if attempt < MAX_LOGIN_ATTEMPTS else "failed"
-                        )
-
-                        if attempt < MAX_LOGIN_ATTEMPTS:
-                            if _is_aborted(): break
-                            logger.info(
-                                f"[Start All] {username} — retrying in 5s "
-                                f"(attempt {attempt + 1}/{MAX_LOGIN_ATTEMPTS})"
-                            )
-                            _abortable_sleep(5)
-
-                if _is_aborted():
-                    if bot_status["status"] not in ("running", "aborted"):
-                        bot_status["status"] = "aborted"
-                        bot_status["error"] = "Cancelled by Stop All"
-                    continue
-
-                if not login_success and username not in already_running:
-                    bot_status["status"] = "failed"
-                    if not bot_status["error"]:
-                        bot_status["error"] = (
-                            f"All {MAX_LOGIN_ATTEMPTS} attempts exhausted."
-                        )
-
-            _start_all_status["running"] = False
-            _start_all_status["finished_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
-
-            # Summary
-            succeeded = sum(
-                1 for b in _start_all_status["bots"].values()
-                if b["status"] in ("running",)
+        try:
+            proc = _sp.Popen(
+                [str(python_exe), str(script_path)],
+                stdout=open(str(log_file), "w"),
+                stderr=_sp.STDOUT,
+                cwd=str(project_root),
             )
-            failed = sum(
-                1 for b in _start_all_status["bots"].values()
-                if b["status"] == "failed"
-            )
-            aborted = sum(
-                1 for b in _start_all_status["bots"].values()
-                if b["status"] == "aborted"
-            )
-            logger.info(
-                f"[Start All] ========== DONE: {succeeded} running, "
-                f"{failed} failed, {aborted} aborted =========="
-            )
-
-        thread = threading.Thread(target=_sequential_start, daemon=True)
-        thread.start()
-
-        return jsonify({
-            "results": [{"success": True, "message": "Sequential start initiated with retry"}],
-            "sequential": True,
-            "file_count": len(launch_order),
-            "max_attempts": MAX_LOGIN_ATTEMPTS,
-        })
-
-    @app.route("/api/start-all-status")
-    def api_start_all_status():
-        """Return the current start-all progress (per-bot attempt status)."""
-        return jsonify(_start_all_status)
+            logger.info(f"[Start All] start_all_clean.py launched (pid={proc.pid})")
+            return jsonify({"success": True, "pid": proc.pid})
+        except Exception as e:
+            logger.error(f"[Start All] Failed: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @app.route("/api/bot-errors")
     def api_bot_errors():
@@ -823,13 +332,31 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
 
     @app.route("/api/rdp/stop/<session_id>", methods=["POST"])
     def api_rdp_stop(session_id: str):
-        """Stop a specific RDP session by hwnd."""
+        """Stop a specific RDP session: kill bots, logoff, close mstsc."""
+        from dashboard.session_monitor import (
+            _find_rdp_session_ids, _kill_bot_processes_in_session,
+            _logoff_sessions_elevated,
+        )
         try:
             hwnd = int(session_id)
         except ValueError:
             return jsonify({"success": False, "error": "Invalid session id"}), 400
-        result = stop_rdp_session(hwnd)
-        return jsonify(result)
+
+        # Find the WTS session ID for this hwnd
+        rdp_sessions = _find_rdp_session_ids()
+        # Try to match by finding which session owns this window
+        # If session_id looks like a WTS session ID (small number), use it directly
+        # Otherwise treat as hwnd and fall back to stop_rdp_session
+        if hwnd < 1000:
+            # Likely a WTS session ID
+            _kill_bot_processes_in_session(hwnd)
+            import time; time.sleep(1)
+            _logoff_sessions_elevated([hwnd])
+            return jsonify({"success": True, "session_id": hwnd})
+        else:
+            # hwnd — just close the mstsc window
+            result = stop_rdp_session(hwnd)
+            return jsonify(result)
 
     @app.route("/api/rdp/stop-all", methods=["POST"])
     def api_rdp_stop_all():
@@ -889,9 +416,8 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
 
     @app.route("/api/start-monitoring", methods=["POST"])
     def api_start_monitoring():
-        """Launch monitor-only mode inside each active RDP session."""
-        result = start_monitoring_in_sessions(project_root)
-        return jsonify(result)
+        """Disabled — use Start All (start_all_clean.py) instead."""
+        return jsonify({"success": False, "error": "Use Start All instead"}), 400
 
     @app.route("/api/clear-demo-db", methods=["POST"])
     def api_clear_demo_db():
@@ -922,5 +448,90 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
         except Exception as e:
             logger.error(f"Failed to clear demo DB: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/locations")
+    def api_locations():
+        from mhtagentic.db import get_all_locations
+        if db_path.exists():
+            try:
+                locations = get_all_locations(str(db_path))
+            except Exception as e:
+                logger.error(f"Locations query failed: {e}")
+                locations = []
+        else:
+            locations = []
+        return jsonify({"locations": locations})
+
+    @app.route("/api/locations/<name>/toggle", methods=["POST"])
+    def api_toggle_location(name):
+        from mhtagentic.db import toggle_location_active, get_all_locations
+        data = request.get_json(silent=True) or {}
+        active = data.get("active", True)
+        success = toggle_location_active(str(db_path), name, active)
+        locations = get_all_locations(str(db_path)) if db_path.exists() else []
+        return jsonify({"success": success, "locations": locations})
+
+    @app.route("/api/locations/add", methods=["POST"])
+    def api_add_location():
+        from mhtagentic.db import add_location, get_all_locations
+        data = request.get_json(silent=True) or {}
+        name = data.get("name", "").strip().upper()
+        if not name:
+            return jsonify({"success": False, "error": "No name"}), 400
+        success = add_location(str(db_path), name)
+        locations = get_all_locations(str(db_path)) if db_path.exists() else []
+        return jsonify({"success": success, "locations": locations})
+
+    @app.route("/api/config")
+    def api_config():
+        from mhtagentic.db import get_config
+        if db_path.exists():
+            try:
+                config = get_config(str(db_path))
+            except Exception:
+                config = {}
+        else:
+            config = {}
+        return jsonify(config)
+
+    @app.route("/api/config", methods=["POST"])
+    def api_config_update():
+        from mhtagentic.db import set_config, get_config
+        data = request.get_json(silent=True) or {}
+        for k, v in data.items():
+            set_config(str(db_path), k, str(v))
+        config = get_config(str(db_path)) if db_path.exists() else {}
+        return jsonify({"success": True, "config": config})
+
+    @app.route("/api/rdp/reboot/<slot_name>", methods=["POST"])
+    def api_reboot_bot(slot_name):
+        """Kill a specific bot's processes and relaunch it."""
+        if db_path.exists():
+            try:
+                release_slot(str(db_path), slot_name.lower())
+            except Exception:
+                pass
+
+        # All RDPs use the same username — find session by matching slot name in window titles
+        from dashboard.session_monitor import (
+            _find_rdp_session_ids, _kill_bot_processes_in_session,
+            _logoff_sessions_elevated,
+        )
+        rdp_sessions = _find_rdp_session_ids()
+        # Match by slot name (e.g. "experityb" matches session with username containing it)
+        target_sids = [s["session_id"] for s in rdp_sessions
+                       if slot_name.lower() in s.get("username", "").lower()
+                       or slot_name.lower() in s.get("station", "").lower()]
+
+        if not target_sids:
+            # Fallback: log off by username directly
+            _logoff_rdp_user(slot_name)
+        else:
+            for sid in target_sids:
+                _kill_bot_processes_in_session(sid)
+            import time; time.sleep(1)
+            _logoff_sessions_elevated(target_sids)
+
+        return jsonify({"success": True, "message": f"Rebooting {slot_name}..."})
 
     return app

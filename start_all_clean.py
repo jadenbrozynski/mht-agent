@@ -19,6 +19,13 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 
+from mhtagentic.db.database import (
+    get_config,
+    get_all_locations,
+    release_all_locations,
+    assign_location,
+)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -28,20 +35,73 @@ RDP_DIR = Path(r"C:\Users\jaden\Desktop")
 DATA_DIR = Path(r"C:\ProgramData\MHTAgentic")
 DB_PATH = DATA_DIR / "mht_data.db"
 
-RDP_FILES = {
-    "ExperityB": RDP_DIR / "ExperityB_MHT.rdp",
-    "ExperityC": RDP_DIR / "ExperityC_MHT.rdp",
-    "ExperityD": RDP_DIR / "ExperityD_MHT.rdp",
-}
+# Template .rdp file to clone settings from (username, password, etc.)
+_RDP_TEMPLATE = RDP_DIR / "ExperityB_MHT.rdp"
 
-# (label, rdp_file_key)
-RDP_LIST = [
-    ("RDP1", "ExperityB"),
-    ("RDP2", "ExperityC"),
-    ("RDP3", "ExperityD"),
-]
+
+def _generate_rdp_files(count: int) -> list:
+    """Dynamically generate .rdp files arranged in a grid layout.
+
+    Returns list of (label, rdp_key, rdp_path) tuples.
+    """
+    import ctypes
+    screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+    screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+
+    # Read template for username/password/settings
+    template_lines = []
+    if _RDP_TEMPLATE.exists():
+        template_lines = _RDP_TEMPLATE.read_text().strip().splitlines()
+
+    # Extract settings from template (everything except winposstr)
+    base_settings = [l for l in template_lines if not l.startswith("winposstr:")]
+    # Extract password line for reuse
+    password_line = next((l for l in template_lines if l.startswith("password 51:")), "")
+    username_line = next((l for l in template_lines if l.startswith("username:")), "username:s:ExperityB")
+
+    # Grid layout: 3 columns, as many rows as needed
+    cols = min(count, 3)
+    rows = (count + cols - 1) // cols
+    cell_w = screen_w // cols
+    cell_h = screen_h // rows
+
+    rdp_labels = []  # (label, rdp_key, rdp_path)
+    slot_letters = "BCDEFGHIJKLMNOP"
+
+    for i in range(count):
+        col = i % cols
+        row = i // cols
+        x1 = col * cell_w
+        y1 = row * cell_h
+        x2 = x1 + cell_w
+        y2 = y1 + cell_h
+
+        letter = slot_letters[i] if i < len(slot_letters) else str(i)
+        rdp_key = f"Experity{letter}"
+        label = f"RDP{i + 1}"
+        rdp_path = RDP_DIR / f"{rdp_key}_MHT.rdp"
+
+        # Build .rdp file content
+        lines = []
+        for l in base_settings:
+            if l.startswith("username:"):
+                lines.append(username_line)
+            else:
+                lines.append(l)
+        lines.append(f"winposstr:s:0,1,{x1},{y1},{x2},{y2}")
+
+        rdp_path.write_text("\n".join(lines) + "\n")
+        rdp_labels.append((label, rdp_key, rdp_path))
+
+    return rdp_labels
+
+
+# Legacy dicts for backward compatibility (populated dynamically at startup)
+RDP_FILES = {}
+ALL_RDPS = []
 
 STATUS_LABELS = {
+    5: "Retrying login",
     10: "Opening Experity",
     20: "Entering username (Screen 1)",
     30: "Clicking Next (Screen 1)",
@@ -53,6 +113,13 @@ STATUS_LABELS = {
     90: "Entering OTP code (Screen 3)",
     100: "Clicking Verify (Screen 3)",
     110: "Login complete",
+    # Post-login phase (launcher.pyw --monitor-only)
+    120: "Waiting for Tracking Board",
+    130: "EMR found",
+    140: "Switching location",
+    150: "Location confirmed",
+    160: "Location claimed",
+    200: "Monitoring active",
     -1: "Error",
     -2: "Skipped (already logged in)",
 }
@@ -101,13 +168,31 @@ def _log_status(run_seed, rdp_label, session_id, status_code, status_msg="",
 # ---------------------------------------------------------------------------
 # Build the elevated helper script (runs as SYSTEM via PsExec)
 # ---------------------------------------------------------------------------
-def build_helper_script(rdp_labels, run_seed):
-    """Write a Python script that SYSTEM runs to find sessions and inject clean_bot."""
+def build_helper_script(rdp_labels, run_seed, claimed_sids=None, assignments=None):
+    """Write a Python script that SYSTEM runs to find sessions and inject clean_bot.
+
+    Args:
+        rdp_labels: list of labels like ['RDP1']
+        run_seed: hex run identifier
+        claimed_sids: session IDs already used by previous RDPs
+        assignments: list of (label, rdp_key, role, location) tuples.
+                     If None, defaults to inbound + first DB location.
+    """
+    claimed_sids = claimed_sids or []
+    assignments = assignments or []
+    # Build lookup from label -> (role, location) for .bat generation
+    _assign_map = {a[0]: (a[2], a[3]) for a in assignments}
+
     # Find clean_bot.py
     shared_root = Path(r"C:\MHTAgentic")
     bot_script = shared_root / "clean_bot.py"
     if not bot_script.exists():
         bot_script = PROJECT_ROOT / "clean_bot.py"
+
+    # Find launcher.pyw
+    launcher_script = shared_root / "launcher.pyw"
+    if not launcher_script.exists():
+        launcher_script = PROJECT_ROOT / "launcher.pyw"
 
     # Find python.exe
     python_dir = Path(sys.executable).parent
@@ -128,6 +213,7 @@ def build_helper_script(rdp_labels, run_seed):
 
     # Write per-label wrapper .bat files
     bot_labels = repr(rdp_labels)  # e.g. ['RDP1', 'RDP2', 'RDP3']
+    claimed_repr = repr(claimed_sids)  # e.g. [34, 35]
 
     helper_script = r'''
 import ctypes, ctypes.wintypes, sys, time, os
@@ -168,6 +254,9 @@ advapi32.AdjustTokenPrivileges(tok, False, ctypes.byref(tp), 0, None, None)
 kernel32.CloseHandle(tok)
 logmsg("Privileges adjusted")
 
+CLAIMED_SIDS = set(''' + claimed_repr + r''')
+logmsg(f"Claimed session IDs to skip: {CLAIMED_SIDS}")
+
 # Enumerate RDP sessions
 class WTS_SESSION_INFO(ctypes.Structure):
     _fields_ = [
@@ -176,15 +265,6 @@ class WTS_SESSION_INFO(ctypes.Structure):
         ("State", ctypes.wintypes.DWORD),
     ]
 
-WTSActive = 0
-WTSConnected = 1
-WTSDisconnected = 4
-WTSUserName = 5
-
-pInfo = ctypes.POINTER(WTS_SESSION_INFO)()
-count = ctypes.wintypes.DWORD()
-wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(pInfo), ctypes.byref(count))
-
 def find_live_sessions():
     """Brute-force probe sessions with WTSQueryUserToken.
     RDP Wrapper may not update WTS state, so try ALL session IDs."""
@@ -192,7 +272,6 @@ def find_live_sessions():
     WTSQueryUserToken2.argtypes = [ctypes.wintypes.ULONG, ctypes.POINTER(ctypes.wintypes.HANDLE)]
     WTSQueryUserToken2.restype = ctypes.wintypes.BOOL
 
-    # Get all session IDs from WTS
     pInfo2 = ctypes.POINTER(WTS_SESSION_INFO)()
     count2 = ctypes.wintypes.DWORD()
     wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(pInfo2), ctypes.byref(count2))
@@ -204,12 +283,13 @@ def find_live_sessions():
             candidate_sids.add(sid)
     wtsapi32.WTSFreeMemory(pInfo2)
 
-    # Also try IDs 2-60 in case WTS doesn't enumerate them
     for sid in range(2, 61):
         candidate_sids.add(sid)
 
     found = []
     for sid in sorted(candidate_sids):
+        if sid in CLAIMED_SIDS:
+            continue
         tok = ctypes.wintypes.HANDLE()
         ok = WTSQueryUserToken2(sid, ctypes.byref(tok))
         if ok:
@@ -218,20 +298,9 @@ def find_live_sessions():
             found.append({"session_id": sid, "state": 0})
         else:
             err = kernel32.GetLastError()
-            # Log non-trivial errors
             if err not in (1008, 7022, 5):
                 logmsg(f"  session {sid} token err={err}")
     return found
-
-# Retry for up to 90 seconds
-sessions = []
-for attempt in range(30):
-    sessions = find_live_sessions()
-    if sessions:
-        logmsg(f"  Found {len(sessions)} live session(s)")
-        break
-    logmsg(f"  No live sessions (attempt {attempt+1}/30), waiting 3s...")
-    time.sleep(3)
 
 RDP_LABELS = ''' + bot_labels + r'''
 RUN_SEED = "''' + run_seed + r'''"
@@ -240,13 +309,7 @@ PYTHON_EXE = r"''' + str(python_exe) + r'''"
 PYTHONPATH = r"''' + pythonpath_str + r'''"
 PYWIN32_DLL = r"''' + pywin32_sys32 + r'''"
 PYWIN32_DIR = r"''' + pywin32_dll_dir + r'''"
-
-if not sessions:
-    logmsg("ERROR: No RDP sessions found!")
-    log.close()
-    sys.exit(1)
-
-logmsg(f"Found {len(sessions)} RDP session(s), need {len(RDP_LABELS)} label(s)")
+ASSIGN_MAP = ''' + repr(_assign_map) + r'''
 
 # STARTUPINFO / PROCESS_INFORMATION for CreateProcessAsUser
 class STARTUPINFOW(ctypes.Structure):
@@ -317,17 +380,11 @@ CreateProcessAsUserW.argtypes = [
 ]
 CreateProcessAsUserW.restype = ctypes.wintypes.BOOL
 
-# Assign labels to sessions (sorted by session ID)
-for i, label in enumerate(RDP_LABELS):
-    if i >= len(sessions):
-        logmsg(f"WARNING: Not enough sessions for {label}")
-        continue
+def launch_in_session(label, sid):
+    """Write wrapper .bat and launch clean_bot in the given session."""
+    logmsg(f"Launching {label} in session {sid}...")
 
-    sess = sessions[i]
-    sid = sess["session_id"]
-    logmsg(f"Launching {label} in session {sid} (state={sess['state']})...")
-
-    # Write status file marker so monitor knows session ID
+    # Write session ID marker
     sid_file = os.path.join(r"C:\ProgramData\MHTAgentic", f"clean_session_{label}.txt")
     with open(sid_file, "w") as f:
         f.write(str(sid))
@@ -340,6 +397,7 @@ for i, label in enumerate(RDP_LABELS):
     # Write wrapper .bat
     stderr_log = os.path.join(r"C:\ProgramData\MHTAgentic", f"clean_bot_{label}_stderr.log")
     wrapper_bat = os.path.join(r"C:\ProgramData\MHTAgentic", f"clean_bot_{label}.bat")
+    role, location = ASSIGN_MAP.get(label, ("inbound", "ANNISTON"))
     with open(wrapper_bat, "w") as f:
         f.write(
             f"@echo off\r\n"
@@ -349,6 +407,10 @@ for i, label in enumerate(RDP_LABELS):
             f"set PYTHONNOUSERSITE=1\r\n"
             f"set MHT_RDP_LABEL={label}\r\n"
             f"set MHT_RUN_SEED={RUN_SEED}\r\n"
+            f"set BOT_LOCATION={location}\r\n"
+            f"set BOT_ROLE={role}\r\n"
+            f"set MHT_BOT_ROLE={role}\r\n"
+            f"set MHT_BOT_LOCATION={location}\r\n"
             f'"{PYTHON_EXE}" -u "{BOT_SCRIPT}" 2>> "{stderr_log}"\r\n'
         )
 
@@ -357,7 +419,7 @@ for i, label in enumerate(RDP_LABELS):
     if not WTSQueryUserToken(sid, ctypes.byref(user_token)):
         err = kernel32.GetLastError()
         logmsg(f"  ERROR: WTSQueryUserToken failed for session {sid}, error={err}")
-        continue
+        return False
 
     # Duplicate to primary token
     dup_token = ctypes.wintypes.HANDLE()
@@ -366,16 +428,18 @@ for i, label in enumerate(RDP_LABELS):
         err = kernel32.GetLastError()
         logmsg(f"  ERROR: DuplicateTokenEx failed, error={err}")
         kernel32.CloseHandle(user_token)
-        continue
+        return False
 
     # Create environment block
     env_block = ctypes.c_void_p()
     CreateEnvironmentBlock(ctypes.byref(env_block), dup_token, False)
 
-    # STARTUPINFO targeting session desktop
+    # STARTUPINFO — minimize console to prevent focus stealing
     si = STARTUPINFOW()
     si.cb = ctypes.sizeof(STARTUPINFOW)
     si.lpDesktop = "winsta0\\default"
+    si.dwFlags = 0x00000001  # STARTF_USESHOWWINDOW
+    si.wShowWindow = 7       # SW_SHOWMINNOACTIVE
 
     pi = PROCESS_INFORMATION()
 
@@ -400,8 +464,57 @@ for i, label in enumerate(RDP_LABELS):
         DestroyEnvironmentBlock(env_block)
     kernel32.CloseHandle(dup_token)
     kernel32.CloseHandle(user_token)
+    return bool(ok)
 
-logmsg("=== All launches done ===")
+# =====================================================================
+# Main loop: process labels ONE AT A TIME, triggered by orchestrator
+# =====================================================================
+logmsg(f"Waiting for triggers for {len(RDP_LABELS)} label(s): {RDP_LABELS}")
+
+for label in RDP_LABELS:
+    trigger_file = os.path.join(r"C:\ProgramData\MHTAgentic", f"launch_trigger_{label}.txt")
+
+    # Wait for orchestrator to write the trigger (RDP is open and ready)
+    logmsg(f"[{label}] Waiting for trigger: {trigger_file}")
+    for wait_attempt in range(600):  # up to 10 minutes per label
+        if os.path.exists(trigger_file):
+            break
+        time.sleep(1)
+    else:
+        logmsg(f"[{label}] TIMEOUT waiting for trigger (10 min)")
+        continue
+
+    # Remove trigger
+    try:
+        os.remove(trigger_file)
+    except Exception:
+        pass
+    logmsg(f"[{label}] Trigger received, finding new session...")
+
+    # Find ONE new unclaimed session (retry up to 90s)
+    found_sid = None
+    for attempt in range(30):
+        sessions = find_live_sessions()
+        if sessions:
+            found_sid = sessions[0]["session_id"]
+            logmsg(f"[{label}] Found session {found_sid}")
+            break
+        logmsg(f"[{label}] No new session yet (attempt {attempt+1}/30)...")
+        time.sleep(3)
+
+    if found_sid is None:
+        logmsg(f"[{label}] ERROR: No session found after 90s")
+        continue
+
+    # Launch bot in this session
+    ok = launch_in_session(label, found_sid)
+    if ok:
+        CLAIMED_SIDS.add(found_sid)
+        logmsg(f"[{label}] Claimed session {found_sid}")
+    else:
+        logmsg(f"[{label}] Launch failed")
+
+logmsg("=== All labels processed ===")
 log.close()
 '''
 
@@ -415,8 +528,13 @@ log.close()
 # ---------------------------------------------------------------------------
 # Monitor status files
 # ---------------------------------------------------------------------------
-def monitor_status(rdp_label, run_seed, timeout=180):
-    """Poll the per-RDP status file and log transitions to SQLite."""
+def monitor_status(rdp_label, run_seed, timeout=300):
+    """Poll the per-RDP status file and log transitions to SQLite.
+
+    Waits until status 160 (location confirmed) or a terminal code (-1, -2).
+    Login phase: 10-110.  Post-login phase: 120-160.
+    After 160, monitoring continues in background inside the RDP session.
+    """
     status_file = DATA_DIR / f"clean_status_{rdp_label}.txt"
     session_file = DATA_DIR / f"clean_session_{rdp_label}.txt"
     deadline = time.time() + timeout
@@ -444,11 +562,11 @@ def monitor_status(rdp_label, run_seed, timeout=180):
                     duration_ms = int((now - last_status_time) * 1000) if last_status is not None else None
                     last_status_time = now
 
-                    label = STATUS_LABELS.get(code, "Unknown")
+                    label = STATUS_LABELS.get(code, f"Status {code}")
                     extra = f" -- {msg}" if msg and msg != label else ""
                     print(f"  [{code}] {label}{extra}")
 
-                    is_complete = 1 if code in (110, -2) else 0
+                    is_complete = 1 if code in (160, 200) else 0
                     _log_status(
                         run_seed, rdp_label, session_id,
                         code, msg or label,
@@ -457,7 +575,9 @@ def monitor_status(rdp_label, run_seed, timeout=180):
                     )
                     last_status = code
 
-                if code in (110, -1, -2):
+                # Terminal codes: 160 (location confirmed), 200 (monitoring active),
+                # -1 (error), -2 (already logged in -> still chain to launcher)
+                if code in (160, 200, -1, -2):
                     return code
             except Exception:
                 pass
@@ -472,6 +592,95 @@ def monitor_status(rdp_label, run_seed, timeout=180):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _dismiss_mstsc_dialogs(rdp_key, timeout=30):
+    """Wait for mstsc to connect, sending Enter to dismiss any session-select dialogs.
+
+    mstsc may show a 'select session to reconnect' dialog when there are
+    disconnected sessions. This function detects those dialogs and sends Enter
+    to pick the default and continue connecting.
+    """
+    import ctypes.wintypes
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    _user32 = ctypes.windll.user32
+
+    def _get_class(hwnd):
+        buf = ctypes.create_unicode_buffer(256)
+        _user32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
+    def _get_title(hwnd):
+        length = _user32.GetWindowTextLengthW(hwnd) + 1
+        buf = ctypes.create_unicode_buffer(length)
+        _user32.GetWindowTextW(hwnd, buf, length)
+        return buf.value
+
+    deadline = time.time() + timeout
+    enter_sent = 0
+    grace_until = time.time() + 8  # let mstsc try to connect on its own first
+
+    while time.time() < deadline:
+        # Check if the RDP session connected (window title has the rdp_key name)
+        mstsc_windows = []
+        connected = False
+
+        def _enum(hwnd, _lp):
+            nonlocal connected
+            if not _user32.IsWindowVisible(hwnd):
+                return True
+            if _get_class(hwnd) == "TscShellContainerClass":
+                title = _get_title(hwnd)
+                mstsc_windows.append((hwnd, title))
+                if rdp_key.lower() in title.lower():
+                    connected = True
+            return True
+
+        _user32.EnumWindows(WNDENUMPROC(_enum), 0)
+
+        if connected:
+            print(f"  RDP connected ({rdp_key})")
+            return True
+
+        # After grace period, send Enter to dismiss dialogs
+        if time.time() > grace_until and enter_sent < 5:
+            for hwnd, title in mstsc_windows:
+                # Dialog windows say "Remote Desktop Connection" without the server name
+                if "remote desktop connection" in title.lower():
+                    _user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.3)
+                    # Send Enter via PostMessage (WM_KEYDOWN + WM_KEYUP for VK_RETURN)
+                    VK_RETURN = 0x0D
+                    _user32.PostMessageW(hwnd, 0x0100, VK_RETURN, 0)  # WM_KEYDOWN
+                    time.sleep(0.05)
+                    _user32.PostMessageW(hwnd, 0x0101, VK_RETURN, 0)  # WM_KEYUP
+                    enter_sent += 1
+                    print(f"  Sent Enter to dismiss dialog: '{title}'")
+                    grace_until = time.time() + 5  # wait 5s before next attempt
+                    break
+
+        time.sleep(2)
+
+    print(f"  WARNING: mstsc did not connect after {timeout}s")
+    return False
+
+
+def _build_assignments(rdp_count, inbound_count, outbound_count, locations):
+    """Build assignment plan: (label, rdp_key, role, location) tuples."""
+    rdp_entries = ALL_RDPS[:rdp_count]
+    assignments = []
+    loc_idx = 0
+    for idx, (label, rdp_key) in enumerate(rdp_entries):
+        if idx < inbound_count:
+            role = "inbound"
+            loc = locations[loc_idx]["location_name"] if loc_idx < len(locations) else "ANNISTON"
+            loc_idx += 1
+        else:
+            role = "outbound"
+            loc = locations[0]["location_name"] if locations else "ANNISTON"
+        assignments.append((label, rdp_key, role, loc))
+    return assignments
+
+
 def main():
     if not PSEXEC_PATH.exists():
         print(f"ERROR: PsExec64.exe not found at {PSEXEC_PATH}")
@@ -480,50 +689,105 @@ def main():
     run_seed = os.urandom(6).hex()
     _init_db()
 
-    # Determine which RDPs to process
-    if len(sys.argv) > 1:
-        rdp_key = sys.argv[1]
-        rdp_entries = [(label, key) for label, key in RDP_LIST if key == rdp_key]
-        if not rdp_entries:
-            rdp_entries = [("RDP1", rdp_key)]
-    else:
-        rdp_entries = RDP_LIST
+    # --- Read dynamic config from dashboard DB ---
+    # Active locations drive the count: 1 inbound RDP per location + 1 outbound RDP
+    config = get_config(str(DB_PATH))
+    all_locs = get_all_locations(str(DB_PATH))
+    locations = [loc for loc in all_locs if loc.get("is_active")]
+    if not locations:
+        print("WARNING: No active locations — falling back to all locations")
+        locations = all_locs
 
-    total = len(rdp_entries)
+    inbound_count = len(locations)
+    outbound_count = 1
+    rdp_count = inbound_count + outbound_count
+
+    # Generate .rdp files dynamically — no hardcoded limit
+    rdp_slots = _generate_rdp_files(rdp_count)
+    print(f"  Generated {len(rdp_slots)} RDP files ({inbound_count} inbound + {outbound_count} outbound)")
+
+    # Populate global dicts for backward compatibility
+    global ALL_RDPS, RDP_FILES
+    ALL_RDPS = [(label, key) for label, key, _ in rdp_slots]
+    RDP_FILES = {key: path for _, key, path in rdp_slots}
+
+    release_all_locations(str(DB_PATH))
+
+    # --- Parse --skip <sid,sid,...> for reboot mode (skip other active sessions) ---
+    skip_sids = []
+    args = sys.argv[1:]
+    if "--skip" in args:
+        skip_idx = args.index("--skip")
+        if skip_idx + 1 < len(args):
+            skip_sids = [int(x) for x in args[skip_idx + 1].split(",") if x.strip()]
+            args = args[:skip_idx] + args[skip_idx + 2:]
+        else:
+            args = args[:skip_idx]
+
+    # --- Parse --role <role> for reboot mode ---
+    reboot_role = None
+    if "--role" in args:
+        role_idx = args.index("--role")
+        if role_idx + 1 < len(args):
+            reboot_role = args[role_idx + 1]
+            args = args[:role_idx] + args[role_idx + 2:]
+        else:
+            args = args[:role_idx]
+
+    # --- Determine assignment plan ---
+    if args:
+        # Single RDP override
+        rdp_key = args[0]
+        match = [(label, key) for label, key in ALL_RDPS if key == rdp_key]
+        if not match:
+            match = [("RDP1", rdp_key)]
+        label, key = match[0]
+        role = reboot_role or "inbound"
+        loc = locations[0]["location_name"] if locations else "ANNISTON"
+        assignments = [(label, key, role, loc)]
+    else:
+        assignments = _build_assignments(rdp_count, inbound_count, outbound_count, locations)
+
+    total = len(assignments)
     print(f"=== Multi-RDP Clean Startup ===")
     print(f"  Run seed: {run_seed}")
-    print(f"  RDPs to process: {total}")
+    print(f"  Config: rdp_count={rdp_count}, inbound={inbound_count}, outbound={outbound_count}")
+    print(f"  Locations: {[l['location_name'] for l in locations]}")
+    print(f"  Assignment plan:")
+    for label, rdp_key, role, loc in assignments:
+        print(f"    {label} ({rdp_key}) -> {role} @ {loc}")
     print()
 
-    # Step 1: Open all RDP connections
-    print("Step 1: Opening RDP connections...")
-    for label, rdp_key in rdp_entries:
-        rdp_file = RDP_FILES.get(rdp_key)
-        if not rdp_file or not rdp_file.exists():
-            print(f"  ERROR: {rdp_key} .rdp file not found")
-            continue
-        print(f"  Opening {rdp_key} ({rdp_file.name})...")
-        subprocess.Popen(["mstsc.exe", str(rdp_file)], creationflags=subprocess.DETACHED_PROCESS)
-        time.sleep(3)  # Small gap between RDP opens
-
-    # Step 2: Clean old status files
-    for label, _ in rdp_entries:
-        for f in [DATA_DIR / f"clean_status_{label}.txt", DATA_DIR / f"clean_session_{label}.txt"]:
-            if f.exists():
-                f.unlink()
-
-    # Step 3: Build and launch the elevated helper (it retries session detection internally)
-    rdp_labels = [label for label, _ in rdp_entries]
-    print(f"\nStep 2: Launching clean_bot in sessions (1 UAC prompt)...")
-    helper_path = build_helper_script(rdp_labels, run_seed)
-
-    # Find python.exe for the helper
+    # Find python.exe (used for each helper launch)
     python_dir = Path(sys.executable).parent
     python_exe = python_dir / "python.exe"
     if not python_exe.exists():
         python_exe = Path(r"C:\Program Files\Python39\python.exe")
 
-    # PsExec -s runs helper as SYSTEM (needed for WTSQueryUserToken)
+    shell32 = ctypes.windll.shell32
+    if skip_sids:
+        print(f"  Skipping session IDs: {skip_sids}")
+    results = {}
+
+    # =================================================================
+    # Phase 1: Clean old status/trigger files
+    # =================================================================
+    for label, rdp_key, role, loc in assignments:
+        for f in [DATA_DIR / f"clean_status_{label}.txt",
+                  DATA_DIR / f"clean_session_{label}.txt",
+                  DATA_DIR / f"launch_trigger_{label}.txt"]:
+            if f.exists():
+                f.unlink()
+
+    # =================================================================
+    # Phase 2: Build ONE helper for ALL RDPs, ONE PsExec/UAC call
+    # The helper stays running and waits for trigger files per-label.
+    # =================================================================
+    all_labels = [label for label, _, _, _ in assignments]
+    print(f"  Launching elevated helper for {len(all_labels)} RDP(s) (single UAC prompt)...")
+    helper_path = build_helper_script(all_labels, run_seed, list(skip_sids),
+                                      assignments=assignments)
+
     psexec_bat = DATA_DIR / "clean_psexec_launcher.bat"
     with open(psexec_bat, "w") as f:
         f.write(
@@ -532,30 +796,61 @@ def main():
             f'"{python_exe}" -u "{helper_path}"\r\n'
         )
 
-    shell32 = ctypes.windll.shell32
-    result = shell32.ShellExecuteW(None, "runas", str(psexec_bat), None, None, 0)
-    if result <= 32:
+    uac_result = shell32.ShellExecuteW(None, "runas", str(psexec_bat), None, None, 0)
+    if uac_result <= 32:
         print("  ERROR: UAC denied or ShellExecute failed")
         sys.exit(1)
+    print(f"  Helper started (waiting for triggers)\n")
 
-    print("  Helper launched (will retry until sessions appear)...")
+    # Give PsExec a moment to start the helper
+    time.sleep(3)
 
-    # Step 3: Monitor each RDP's status file
-    print(f"\nStep 3: Monitoring progress...")
-    results = {}
-    for label, rdp_key in rdp_entries:
-        print(f"\n[{label}] ({rdp_key})")
+    # =================================================================
+    # Phase 3: Open RDPs sequentially (fuse) — trigger helper per label
+    # =================================================================
+    for idx, (label, rdp_key, role, loc) in enumerate(assignments, 1):
+        print(f"[{idx}/{total}] {label} ({rdp_key}) — {role} @ {loc}")
+        print(f"  {'='*40}")
         start_time = time.time()
+
+        rdp_file = RDP_FILES.get(rdp_key)
+        if not rdp_file or not rdp_file.exists():
+            print(f"  ERROR: {rdp_key} .rdp file not found")
+            results[label] = "FAILED"
+            continue
+
+        # Open RDP and wait for connection (dismiss session-select dialogs)
+        print(f"  Opening {rdp_key} ({rdp_file.name})...")
+        subprocess.Popen(["mstsc.exe", str(rdp_file)], creationflags=subprocess.DETACHED_PROCESS)
+        time.sleep(3)
+        _dismiss_mstsc_dialogs(rdp_key, timeout=30)
+
+        # Signal the helper to find the new session and launch the bot
+        trigger_file = DATA_DIR / f"launch_trigger_{label}.txt"
+        trigger_file.write_text("go")
+        print(f"  Trigger written — helper will find session and launch bot")
+
+        # Monitor until location confirmed (160) or terminal code
+        print(f"  Monitoring (login -> EMR -> location)...")
         code = monitor_status(label, run_seed)
         elapsed = time.time() - start_time
 
-        success = code in (110, -2)
+        # Formally claim the location slot in DB after status 160 or 200
+        if code in (160, 200):
+            assigned = assign_location(str(DB_PATH), rdp_key, role)
+            if assigned:
+                print(f"  DB: assigned {rdp_key} -> {assigned} ({role})")
+            else:
+                print(f"  DB: no available location to assign (may already be taken)")
+
+        success = code in (160, 200, -2)
         status = "SUCCESS" if success else "FAILED"
         results[label] = status
         print(f"  Result: {status} ({elapsed:.1f}s)")
+        print()
 
     # Summary
-    print(f"\n{'='*50}")
+    print(f"{'='*50}")
     print(f"  Summary (seed: {run_seed})")
     print(f"{'='*50}")
     for label, status in results.items():

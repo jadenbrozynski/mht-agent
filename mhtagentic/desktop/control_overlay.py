@@ -1334,6 +1334,38 @@ class DemoStatusOverlay:
         canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline=fill)
         canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline=fill)
 
+    def hide(self):
+        """Hide the status overlay (thread-safe)."""
+        if self.panel and self.root and self._running:
+            try:
+                self.root.after(0, lambda: self.panel.withdraw() if self.panel else None)
+            except:
+                pass
+
+    def show(self):
+        """Show the status overlay (thread-safe)."""
+        if self.panel and self.root and self._running:
+            try:
+                self.root.after(0, lambda: self.panel.deiconify() if self.panel else None)
+            except:
+                pass
+
+    # --- ControlOverlay-compatible interface for outbound worker ---
+
+    is_killed = False  # compatibility flag
+
+    def set_status(self, text: str, color: str = "#4ECDC4"):
+        """ControlOverlay-compatible: maps to outbound side of pill."""
+        self.update_status(outbound_text=text)
+
+    def set_step(self, text: str):
+        """ControlOverlay-compatible: maps to outbound side of pill."""
+        self.update_status(outbound_text=text)
+
+    def add_log(self, message: str):
+        """ControlOverlay-compatible: no-op (pill has no log panel)."""
+        pass
+
     def update_status(self, inbound_text=None, outbound_text=None):
         """Update the status bar text (thread-safe). Pass None to leave a side unchanged."""
         if inbound_text is not None:

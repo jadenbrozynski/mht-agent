@@ -3,133 +3,265 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MHT Agentic - RDP Monitor</title>
+    <title>MHT Agentic Dashboard</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <header>
-        <div class="header-left">
-            <h1>MHT Agentic</h1>
-            <span class="subtitle">RDP Session Monitor</span>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <div class="brand-icon">M</div>
+            <div>
+                <div class="brand-name">MHT Agentic</div>
+                <div class="brand-sub">RDP Monitor</div>
+            </div>
         </div>
-        <div class="header-right">
-            <span id="bot-status" class="status-badge unknown">Checking...</span>
-            <span id="clock"></span>
+
+        <nav class="sidebar-nav">
+            <a class="nav-item active" data-tab="monitor" onclick="switchTab('monitor')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                <span>Monitor</span>
+            </a>
+            <a class="nav-item" data-tab="configure" onclick="switchTab('configure')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                <span>Configure</span>
+            </a>
+            <a class="nav-item" data-tab="health" onclick="switchTab('health')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <span>Health</span>
+            </a>
+            <a class="nav-item" data-tab="events" onclick="switchTab('events')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                <span>Events</span>
+            </a>
+            <a class="nav-item" data-tab="errors" onclick="switchTab('errors')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Errors</span>
+                <span id="nav-error-badge" class="nav-badge" style="display:none">0</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <span id="bot-status" class="status-indicator unknown">Checking...</span>
+            <span id="clock" class="sidebar-clock"></span>
         </div>
-    </header>
+    </aside>
 
-    <main>
-        <!-- Stats Bar -->
-        <section class="stats-bar">
-            <div class="stat-card">
-                <div class="stat-value" id="stat-events">--</div>
-                <div class="stat-label">Events Today</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-inbound">--</div>
-                <div class="stat-label">Inbound</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-outbound">--</div>
-                <div class="stat-label">Outbound</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-errors">--</div>
-                <div class="stat-label">Errors</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-patients">--</div>
-                <div class="stat-label">Patients (File)</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-avg-time">--</div>
-                <div class="stat-label">Avg Time (s)</div>
-            </div>
-        </section>
+    <!-- Main Content -->
+    <div class="main-content">
 
-        <!-- Bot Slots -->
-        <section class="slots-panel">
-            <h3>Bot Slots</h3>
-            <div class="slots-grid">
-                <div id="slot-experityb" class="slot-card slot-open">
-                    <div class="slot-name">EXPERITYB (inbound)</div>
-                    <div class="slot-status">Available</div>
-                    <div class="slot-meta"></div>
+        <!-- ==================== Monitor Tab ==================== -->
+        <div id="tab-monitor" class="tab-panel active">
+            <header class="page-header">
+                <h1>Monitor</h1>
+                <p class="page-desc">Real-time overview of bot sessions and performance metrics.</p>
+            </header>
+
+            <!-- Stats Bar -->
+            <section class="stats-bar">
+                <div class="stat-card">
+                    <div class="stat-label">Events Today</div>
+                    <div class="stat-value" id="stat-events">--</div>
                 </div>
-                <div id="slot-experityd" class="slot-card slot-open">
-                    <div class="slot-name">EXPERITYD (inbound)</div>
-                    <div class="slot-status">Available</div>
-                    <div class="slot-meta"></div>
+                <div class="stat-card">
+                    <div class="stat-label">Inbound</div>
+                    <div class="stat-value" id="stat-inbound">--</div>
                 </div>
-                <div id="slot-experityc" class="slot-card slot-open">
-                    <div class="slot-name">EXPERITYC (outbound)</div>
-                    <div class="slot-status">Available</div>
-                    <div class="slot-meta"></div>
+                <div class="stat-card">
+                    <div class="stat-label">Outbound</div>
+                    <div class="stat-value" id="stat-outbound">--</div>
                 </div>
-            </div>
-        </section>
+                <div class="stat-card">
+                    <div class="stat-label">Errors</div>
+                    <div class="stat-value" id="stat-errors">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Patients (File)</div>
+                    <div class="stat-value" id="stat-patients">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Avg Time (s)</div>
+                    <div class="stat-value" id="stat-avg-time">--</div>
+                </div>
+            </section>
 
-        <!-- Start-All Progress (hidden until start-all runs) -->
-        <section id="start-all-panel" class="start-all-panel" style="display:none;">
-            <h3>Start All Progress</h3>
-            <div id="start-all-bots" class="start-all-grid"></div>
-        </section>
+            <!-- Bot Slots -->
+            <section class="card">
+                <div class="card-header">
+                    <h3>Bot Slots</h3>
+                </div>
+                <div class="slots-grid">
+                    <div id="slot-experityb" class="slot-card slot-open">
+                        <div class="slot-dot"></div>
+                        <div class="slot-info">
+                            <div class="slot-name">EXPERITYB (inbound)</div>
+                            <div class="slot-status">Available</div>
+                        </div>
+                        <div class="slot-meta"></div>
+                    </div>
+                    <div id="slot-experityd" class="slot-card slot-open">
+                        <div class="slot-dot"></div>
+                        <div class="slot-info">
+                            <div class="slot-name">EXPERITYD (inbound)</div>
+                            <div class="slot-status">Available</div>
+                        </div>
+                        <div class="slot-meta"></div>
+                    </div>
+                    <div id="slot-experityc" class="slot-card slot-open">
+                        <div class="slot-dot"></div>
+                        <div class="slot-info">
+                            <div class="slot-name">EXPERITYC (outbound)</div>
+                            <div class="slot-status">Available</div>
+                        </div>
+                        <div class="slot-meta"></div>
+                    </div>
+                </div>
+            </section>
 
-        <!-- Bot Error Log (hidden until errors exist) -->
-        <section id="bot-errors-panel" class="bot-errors-panel" style="display:none;">
-            <div class="errors-header">
-                <h3>Bot Login Errors</h3>
-                <span id="error-count-badge" class="error-count-badge">0</span>
-            </div>
-            <div id="bot-errors-list" class="bot-errors-list"></div>
-        </section>
+            <!-- Controls -->
+            <section class="controls-bar">
+                <h3>RDP Sessions</h3>
+                <div class="controls-right">
+                    <button id="btn-start-all" class="btn btn-primary" onclick="startAllRDP()">Start All</button>
+                    <button id="btn-clear-db" class="btn btn-secondary" onclick="clearDemoDB()">Clear Demo DB</button>
+                    <button id="btn-stop-all" class="btn btn-secondary" onclick="stopAllRDP()">Stop All</button>
+                </div>
+            </section>
 
-        <!-- RDP Controls -->
-        <section class="rdp-controls">
-            <div class="controls-left">
-                <h2>RDP Sessions</h2>
-            </div>
-            <div class="controls-right">
-                <button id="btn-start-all" class="btn btn-green" onclick="startAllRDP()">Start All</button>
-                <button id="btn-start-monitor" class="btn btn-blue" onclick="startMonitoring()">Start Monitoring</button>
-                <button id="btn-clear-db" class="btn btn-orange" onclick="clearDemoDB()">Clear Demo DB</button>
-                <button id="btn-stop-all" class="btn btn-red" onclick="stopAllRDP()">Stop All</button>
-            </div>
-        </section>
+            <!-- Session Cards -->
+            <section id="sessions-container" class="sessions-grid">
+                <div class="session-card placeholder">
+                    <p>Searching for RDP sessions...</p>
+                </div>
+            </section>
+        </div>
 
-        <!-- Session Cards -->
-        <section id="sessions-container" class="sessions-grid">
-            <div class="session-card placeholder">
-                <p>Searching for RDP sessions...</p>
-            </div>
-        </section>
+        <!-- ==================== Configure Tab ==================== -->
+        <div id="tab-configure" class="tab-panel">
+            <header class="page-header">
+                <h1>Configure</h1>
+                <p class="page-desc">Clinic locations and bot settings.</p>
+            </header>
 
-        <!-- Recent Events Table -->
-        <section class="events-section">
-            <h2>Recent Events</h2>
-            <div class="table-wrap">
-                <table id="events-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Time</th>
-                            <th>Dir</th>
-                            <th>Patient</th>
-                            <th>Status</th>
-                            <th>Errors</th>
-                        </tr>
-                    </thead>
-                    <tbody id="events-body">
-                        <tr><td colspan="6" class="empty">Loading...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    </main>
+            <div class="configure-layout">
+                <!-- Left: Locations -->
+                <section class="card">
+                    <div class="card-header">
+                        <h3>Locations</h3>
+                    </div>
+                    <div id="locations-list" class="locations-compact">
+                        <div class="loading-msg">Loading...</div>
+                    </div>
+                </section>
 
-    <footer>
-        <span>Last updated: <span id="last-update">--</span></span>
-    </footer>
+                <!-- Right: Settings -->
+                <section class="card">
+                    <div class="card-header">
+                        <h3>Settings</h3>
+                    </div>
+                    <div class="settings-rows">
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-name">RDP Sessions</span>
+                                <span class="setting-desc">Total concurrent RDP connections</span>
+                            </div>
+                            <input type="number" id="cfg-rdp-count" class="setting-input" value="3" min="1" max="10">
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-name">Inbound Bots</span>
+                                <span class="setting-desc">Patient intake processing</span>
+                            </div>
+                            <input type="number" id="cfg-inbound-count" class="setting-input" value="2" min="0" max="10">
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">
+                                <span class="setting-name">Outbound Bots</span>
+                                <span class="setting-desc">Assessment result entry</span>
+                            </div>
+                            <input type="number" id="cfg-outbound-count" class="setting-input" value="1" min="0" max="10">
+                        </div>
+                    </div>
+                    <div class="config-actions">
+                        <button class="btn btn-primary" onclick="saveConfig()">Save</button>
+                        <button class="btn btn-secondary" onclick="loadConfig()">Reset</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- ==================== Health Tab ==================== -->
+        <div id="tab-health" class="tab-panel">
+            <header class="page-header">
+                <h1>Health</h1>
+                <p class="page-desc">System status and bot health monitoring.</p>
+            </header>
+
+            <section class="card">
+                <div class="card-header">
+                    <h3>System Status</h3>
+                    <span id="health-overall" class="health-overall-badge">--</span>
+                </div>
+                <div id="health-cards" class="health-grid">
+                    <div class="loading-msg">Loading health data...</div>
+                </div>
+            </section>
+        </div>
+
+        <!-- ==================== Events Tab ==================== -->
+        <div id="tab-events" class="tab-panel">
+            <header class="page-header">
+                <h1>Events</h1>
+                <p class="page-desc">Recent inbound and outbound event activity.</p>
+            </header>
+
+            <section class="card">
+                <div class="card-header">
+                    <h3>Recent Events</h3>
+                    <span id="last-update" class="meta-text">--</span>
+                </div>
+                <div class="table-wrap">
+                    <table id="events-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Time</th>
+                                <th>Dir</th>
+                                <th>Patient</th>
+                                <th>DOB</th>
+                                <th>Phone</th>
+                                <th>Email</th>
+                                <th>Address</th>
+                                <th>Zip</th>
+                                <th>Location</th>
+                                <th>Status</th>
+                                <th>Errors</th>
+                            </tr>
+                        </thead>
+                        <tbody id="events-body">
+                            <tr><td colspan="12" class="empty">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- ==================== Errors Tab ==================== -->
+        <div id="tab-errors" class="tab-panel">
+            <header class="page-header">
+                <h1>Errors</h1>
+                <p class="page-desc">Bot login errors and failure diagnostics.</p>
+            </header>
+
+            <section class="card">
+                <div class="card-header">
+                    <h3>Bot Login Errors</h3>
+                    <span id="error-count-badge" class="error-count-badge">0</span>
+                </div>
+                <div id="bot-errors-list" class="bot-errors-list"></div>
+            </section>
+        </div>
+    </div>
 
     <script src="/static/dashboard.js"></script>
 </body>
