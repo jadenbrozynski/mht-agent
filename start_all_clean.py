@@ -46,7 +46,9 @@ def _find_system_python(exe_name="python.exe"):
 # Config
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
-PSEXEC_PATH = Path(r"C:\ProgramData\MHTAgentic\PsExec64.exe")
+PSEXEC_PATH = Path(r"C:\Program Files\pstools\PsExec64.exe")
+if not PSEXEC_PATH.exists():
+    PSEXEC_PATH = Path(r"C:\ProgramData\MHTAgentic\PsExec64.exe")
 RDP_DIR = Path.home() / "Desktop"
 DATA_DIR = Path(r"C:\ProgramData\MHTAgentic")
 DB_PATH = DATA_DIR / "mht_data.db"

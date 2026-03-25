@@ -1065,7 +1065,9 @@ def get_recent_events(db_path: Path, limit: int = 50) -> List[Dict]:
 # --- Start Monitoring (remote launch into RDP sessions) ---
 
 # PsExec64 path (downloaded by dashboard setup)
-_PSEXEC_PATH = Path(r"C:\ProgramData\MHTAgentic\PsExec64.exe")
+_PSEXEC_PATH = Path(r"C:\Program Files\pstools\PsExec64.exe")
+if not _PSEXEC_PATH.exists():
+    _PSEXEC_PATH = Path(r"C:\ProgramData\MHTAgentic\PsExec64.exe")
 
 
 def start_monitoring_in_sessions(project_root: Path) -> Dict:
