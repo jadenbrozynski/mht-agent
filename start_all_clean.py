@@ -283,6 +283,20 @@ class WTS_SESSION_INFO(ctypes.Structure):
         ("State", ctypes.wintypes.DWORD),
     ]
 
+SKIP_USERS = {"administrator", "orchestrator"}
+
+def _get_session_username(sid):
+    """Get the username for a given session ID via WTSQuerySessionInformationW."""
+    WTS_USERNAME = 5
+    buf = ctypes.wintypes.LPWSTR()
+    size = ctypes.wintypes.DWORD()
+    ok = wtsapi32.WTSQuerySessionInformationW(0, sid, WTS_USERNAME, ctypes.byref(buf), ctypes.byref(size))
+    if ok and buf.value:
+        username = buf.value
+        wtsapi32.WTSFreeMemory(buf)
+        return username
+    return ""
+
 def find_live_sessions():
     """Brute-force probe sessions with WTSQueryUserToken.
     RDP Wrapper may not update WTS state, so try ALL session IDs."""
@@ -312,7 +326,11 @@ def find_live_sessions():
         ok = WTSQueryUserToken2(sid, ctypes.byref(tok))
         if ok:
             kernel32.CloseHandle(tok)
-            logmsg(f"  LIVE session {sid}")
+            username = _get_session_username(sid)
+            if username.lower() in SKIP_USERS:
+                logmsg(f"  SKIP session {sid} (user={username})")
+                continue
+            logmsg(f"  LIVE session {sid} (user={username})")
             found.append({"session_id": sid, "state": 0})
         else:
             err = kernel32.GetLastError()
