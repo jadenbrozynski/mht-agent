@@ -18,6 +18,25 @@ from mhtagentic.db import release_slot
 
 logger = logging.getLogger("mht_dashboard.monitor")
 
+
+def _find_system_python(exe_name="pythonw.exe"):
+    """Find Python exe dynamically — checks common install locations."""
+    import shutil, sys
+    # Try next to current interpreter first
+    candidate = Path(sys.executable).parent / exe_name
+    if candidate.exists():
+        return candidate
+    found = shutil.which(exe_name)
+    if found:
+        return Path(found)
+    for base in [r"C:\Program Files", r"C:\Program Files (x86)"]:
+        for d in sorted(Path(base).glob("Python*"), reverse=True):
+            c = d / exe_name
+            if c.exists():
+                return c
+    return Path(exe_name)
+
+
 # OTP signal directory — shared across sessions via ProgramData
 _OTP_SIGNAL_DIR = Path(r"C:\ProgramData\MHTAgentic\session_status")
 
@@ -380,7 +399,7 @@ def ensure_autostart_task(project_root: Path) -> Dict:
     python_dir = Path(sys.executable).parent
     pythonw_path = python_dir / "pythonw.exe"
     if not pythonw_path.exists():
-        pythonw_path = Path(r"C:\Program Files\Python39\pythonw.exe")
+        pythonw_path = _find_system_python("pythonw.exe")
 
     results = {}
     missing_users = []
@@ -1078,7 +1097,7 @@ def start_monitoring_in_sessions(project_root: Path) -> Dict:
     python_dir = Path(sys.executable).parent
     pythonw_path = python_dir / "pythonw.exe"
     if not pythonw_path.exists():
-        pythonw_path = Path(r"C:\Program Files\Python39\pythonw.exe")
+        pythonw_path = _find_system_python("pythonw.exe")
 
     # Sort sessions by session_id so launch order is stable
     rdp_sessions.sort(key=lambda s: s["session_id"])
@@ -1101,7 +1120,7 @@ def start_monitoring_in_sessions(project_root: Path) -> Dict:
 
     # Collect Python package paths so SYSTEM can import everything
     # IMPORTANT: C:\ProgramData\MHTAgentic\site-packages MUST be first —
-    # PsExec runs as SYSTEM which cannot access C:\Users\jaden\... paths
+    # PsExec runs as SYSTEM which cannot access user-profile paths
     import site as _site
     extra_paths = [r"C:\ProgramData\MHTAgentic\site-packages"]
     for p in __import__("sys").path:
@@ -1232,11 +1251,11 @@ def launch_bot_in_session(session_id: int, project_root: Path,
     python_dir = Path(sys.executable).parent
     pythonw_path = python_dir / "pythonw.exe"
     if not pythonw_path.exists():
-        pythonw_path = Path(r"C:\Program Files\Python39\pythonw.exe")
+        pythonw_path = _find_system_python("pythonw.exe")
 
     # Collect site-packages paths
     # IMPORTANT: C:\ProgramData\MHTAgentic\site-packages MUST be first —
-    # PsExec runs as SYSTEM which cannot access C:\Users\jaden\... paths
+    # PsExec runs as SYSTEM which cannot access user-profile paths
     extra_paths = [r"C:\ProgramData\MHTAgentic\site-packages"]
     for p in sys.path:
         if "site-packages" in p:

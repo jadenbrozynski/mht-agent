@@ -781,7 +781,9 @@ def _run_post_login():
 
     python_exe = Path(sys.executable).parent / "python.exe"
     if not python_exe.exists():
-        python_exe = Path(r"C:\Program Files\Python39\python.exe")
+        import shutil
+        _found = shutil.which("python.exe")
+        python_exe = Path(_found) if _found else Path("python.exe")
 
     args = [str(python_exe), "-u", str(launcher_path), "--monitor-only"]
     if role == "outbound":

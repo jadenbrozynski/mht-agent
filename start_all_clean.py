@@ -27,11 +27,27 @@ from mhtagentic.db.database import (
 )
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _find_system_python(exe_name="python.exe"):
+    """Find Python exe dynamically — checks common install locations."""
+    import shutil
+    found = shutil.which(exe_name)
+    if found:
+        return Path(found)
+    for base in [r"C:\Program Files", r"C:\Program Files (x86)"]:
+        for d in sorted(Path(base).glob("Python*"), reverse=True):
+            candidate = d / exe_name
+            if candidate.exists():
+                return candidate
+    return Path(exe_name)  # fallback — hope it's on PATH
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
 PSEXEC_PATH = Path(r"C:\ProgramData\MHTAgentic\PsExec64.exe")
-RDP_DIR = Path(r"C:\Users\jaden\Desktop")
+RDP_DIR = Path.home() / "Desktop"
 DATA_DIR = Path(r"C:\ProgramData\MHTAgentic")
 DB_PATH = DATA_DIR / "mht_data.db"
 
@@ -198,7 +214,7 @@ def build_helper_script(rdp_labels, run_seed, claimed_sids=None, assignments=Non
     python_dir = Path(sys.executable).parent
     python_exe = python_dir / "python.exe"
     if not python_exe.exists():
-        python_exe = Path(r"C:\Program Files\Python39\python.exe")
+        python_exe = _find_system_python()
 
     # Build PYTHONPATH
     pd_sp = r"C:\ProgramData\MHTAgentic\site-packages"
@@ -762,7 +778,7 @@ def main():
     python_dir = Path(sys.executable).parent
     python_exe = python_dir / "python.exe"
     if not python_exe.exists():
-        python_exe = Path(r"C:\Program Files\Python39\python.exe")
+        python_exe = _find_system_python()
 
     shell32 = ctypes.windll.shell32
     if skip_sids:

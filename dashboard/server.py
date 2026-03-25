@@ -298,7 +298,9 @@ def create_app(project_root: Path, port: int = 5555) -> Flask:
 
         python_exe = Path(_sys.executable).parent / "python.exe"
         if not python_exe.exists():
-            python_exe = Path(r"C:\Program Files\Python39\python.exe")
+            import shutil as _shutil
+            _found = _shutil.which("python.exe")
+            python_exe = Path(_found) if _found else Path("python.exe")
 
         log_file = Path(r"C:\ProgramData\MHTAgentic\start_all_clean.log")
 
