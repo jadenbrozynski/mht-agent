@@ -425,6 +425,46 @@ def kill_existing_apps():
     pass
 
 
+def _dismiss_logout_popup(win):
+    """Dismiss the 'Confirm log out' popup by clicking No/Cancel."""
+    import time
+    for _ in range(3):
+        try:
+            btns = _get_button_texts(win)
+            title = win.window_text().lower() if win else ""
+            if "confirm" in title and "log" in title:
+                log(f"Logout popup detected: '{win.window_text()}', buttons: {btns}")
+                for btn_text in ("No", "Cancel", "Stay"):
+                    try:
+                        btn = win.child_window(title=btn_text, control_type="Button")
+                        if btn.exists():
+                            btn.click_input()
+                            log(f"Clicked '{btn_text}' on logout popup")
+                            time.sleep(1)
+                            return
+                    except Exception:
+                        continue
+            # Also check for popup as a separate dialog
+            from pywinauto import Desktop
+            for dlg in Desktop(backend="uia").windows():
+                dlg_title = dlg.window_text().lower()
+                if "confirm" in dlg_title and "log" in dlg_title:
+                    log(f"Logout dialog found: '{dlg.window_text()}'")
+                    for btn_text in ("No", "Cancel", "Stay"):
+                        try:
+                            btn = dlg.child_window(title=btn_text, control_type="Button")
+                            if btn.exists():
+                                btn.click_input()
+                                log(f"Clicked '{btn_text}' on logout dialog")
+                                time.sleep(1)
+                                return
+                        except Exception:
+                            continue
+        except Exception as e:
+            log(f"Logout popup check error: {e}")
+        time.sleep(1)
+
+
 # ---------------------------------------------------------------------------
 # Main login flow (single attempt)
 # ---------------------------------------------------------------------------
@@ -454,6 +494,9 @@ def do_login():
     if not win1:
         set_status(-1, "Experity window not found after 60s")
         return -1
+
+    # Dismiss "Confirm log out" popup if it appears
+    _dismiss_logout_popup(win1)
 
     # Check if already logged in (Tracking Board visible, no login fields)
     if _is_tracking_board(win1):
