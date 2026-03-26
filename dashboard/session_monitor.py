@@ -809,7 +809,36 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
     logger.info("[Stop All] Step 1: Killing bot processes...")
     killed = _kill_all_rdp_bot_processes()
     _time.sleep(1)
+
+    # Step 2: Logoff agent sessions only (never orchestrator/administrator)
+    logger.info("[Stop All] Step 2: Logging off agent sessions...")
     logged_off = 0
+    _skip_users = {"orchestrator", "administrator"}
+    try:
+        r = subprocess.run(
+            ['query', 'session'],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.strip().split('\n')[1:]:
+            parts = line.split()
+            if len(parts) >= 4:
+                username = parts[0].strip('>').lower()
+                try:
+                    session_id = int(parts[2])
+                except (ValueError, IndexError):
+                    continue
+                if username in _skip_users:
+                    logger.info(f"[Stop All] Skipping {username} (session {session_id})")
+                    continue
+                if username and session_id > 0:
+                    logger.info(f"[Stop All] Logging off {username} (session {session_id})")
+                    subprocess.run(
+                        ['logoff', str(session_id)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    logged_off += 1
+    except Exception as e:
+        logger.error(f"[Stop All] Session logoff failed: {e}")
 
     # Step 3: Force-reset bot slots
     slots_reset = 0
