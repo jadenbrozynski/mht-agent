@@ -432,7 +432,7 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     error_monitor_running = True
 
     def background_error_monitor():
-        """Background thread that continuously monitors for error and birthday popups."""
+        """Background thread that continuously monitors for error, birthday, and logout popups."""
         from pywinauto import Desktop
         _popup_titles = ('Application Error', 'Error', 'Birthday', 'Experity', 'PROD')
         _popup_buttons = ('OK', 'Ok', 'Close', 'Yes', 'Continue', 'Accept')
@@ -443,6 +443,20 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                     try:
                         title = w.window_text()
                         if not title:
+                            continue
+                        # Dismiss "Confirm Log Out" popup by clicking No
+                        if 'Confirm' in title and 'Log' in title:
+                            buttons = w.descendants(control_type='Button')
+                            for btn in buttons:
+                                try:
+                                    bt = btn.window_text()
+                                    if bt == 'No':
+                                        btn.click_input()
+                                        control.add_log(f"[POPUP MONITOR] Dismissed logout popup via [No]")
+                                        time.sleep(0.3)
+                                        break
+                                except:
+                                    continue
                             continue
                         # Match error popups and birthday modals
                         if any(kw in title for kw in _popup_titles) or 'Error' == title:
