@@ -819,7 +819,15 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
                 wtsapi32.WTSFreeMemory(buf)
                 if username == "agent":
                     logger.info(f"[Stop All] Logging off agent (session {sid})")
-                    subprocess.run(['logoff', str(sid)], capture_output=True, text=True, timeout=10)
+                    # Use PsExec as SYSTEM to logoff — orchestrator doesn't have permission
+                    psexec = str(_PSEXEC_PATH)
+                    if _PSEXEC_PATH.exists():
+                        subprocess.run(
+                            [psexec, '-accepteula', '-nobanner', '-s', 'logoff', str(sid)],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                    else:
+                        subprocess.run(['logoff', str(sid)], capture_output=True, text=True, timeout=10)
                     logged_off += 1
                 else:
                     logger.info(f"[Stop All] Skipping {username} (session {sid})")
