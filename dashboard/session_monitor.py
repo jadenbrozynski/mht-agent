@@ -802,6 +802,10 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
                 ("State", ctypes.wintypes.DWORD),
             ]
 
+        # Set up WTSLogoffSession signature
+        wtsapi32.WTSLogoffSession.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD, ctypes.wintypes.BOOL]
+        wtsapi32.WTSLogoffSession.restype = ctypes.wintypes.BOOL
+
         pInfo = ctypes.POINTER(WTS_SESSION_INFO)()
         count = ctypes.wintypes.DWORD()
         wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(pInfo), ctypes.byref(count))
@@ -819,17 +823,15 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
                 wtsapi32.WTSFreeMemory(buf)
                 if username == "agent":
                     logger.info(f"[Stop All] Logging off agent (session {sid})")
-                    psexec = str(_PSEXEC_PATH)
-                    # Try multiple methods to fully logoff the session
-                    if _PSEXEC_PATH.exists():
-                        # Method 1: reset session (force logoff)
-                        r = subprocess.run(
-                            [psexec, '-accepteula', '-nobanner', '-s', 'reset', 'session', str(sid)],
-                            capture_output=True, text=True, timeout=10,
-                        )
-                        logger.info(f"[Stop All] Reset session {sid}: {r.stdout.strip()} {r.stderr.strip()}")
+                    # Use WTSLogoffSession API directly — no PsExec needed
+                    ok = wtsapi32.WTSLogoffSession(0, sid, True)
+                    if ok:
+                        logger.info(f"[Stop All] WTSLogoffSession({sid}) succeeded")
                     else:
-                        subprocess.run(['logoff', str(sid)], capture_output=True, text=True, timeout=10)
+                        err = ctypes.get_last_error()
+                        logger.error(f"[Stop All] WTSLogoffSession({sid}) failed, error={err}")
+                        # Fallback: try reset session command
+                        subprocess.run(['reset', 'session', str(sid)], capture_output=True, text=True, timeout=10)
                     logged_off += 1
                 else:
                     logger.info(f"[Stop All] Skipping {username} (session {sid})")
