@@ -480,7 +480,7 @@ def launch_in_session(label, sid):
             f"set BOT_ROLE={role}\r\n"
             f"set MHT_BOT_ROLE={role}\r\n"
             f"set MHT_BOT_LOCATION={location}\r\n"
-            f'"{PYTHON_EXE}" -u "{BOT_SCRIPT}" 2>> "{stderr_log}"\r\n'
+            f'"{PYTHON_EXE}" -u "{BOT_SCRIPT}" >> "{stderr_log}" 2>&1\r\n'
         )
 
     # Get session user token
