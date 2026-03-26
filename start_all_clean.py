@@ -104,15 +104,11 @@ def _generate_rdp_files(count: int) -> list:
         label = f"RDP{i + 1}"
         rdp_path = RDP_DIR / f"{rdp_key}_MHT.rdp"
 
-        # Build .rdp file content — override resolution to match window size
+        # Build .rdp file content — keep original resolution, smart sizing scales it
         lines = []
         for l in base_settings:
             if l.startswith("username:"):
                 lines.append(username_line)
-            elif l.startswith("desktopwidth:"):
-                lines.append(f"desktopwidth:i:{cell_w}")
-            elif l.startswith("desktopheight:"):
-                lines.append(f"desktopheight:i:{cell_h}")
             else:
                 lines.append(l)
         lines.append(f"winposstr:s:0,1,{x1},{y1},{x2},{y2}")
