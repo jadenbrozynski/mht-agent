@@ -2687,12 +2687,20 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
     # === MONITORING LOOP ===
     cycle = 0
+    _last_heartbeat = 0
     control.add_log("Starting monitoring loop")
 
     try:
         while not control.is_killed:
             cycle += 1
             control.add_log(f"--- Cycle {cycle} ---")
+            # Heartbeat every 30 seconds
+            if _claimed and time.time() - _last_heartbeat > 30:
+                try:
+                    heartbeat_slot(_db_path, _slot_name)
+                    _last_heartbeat = time.time()
+                except Exception:
+                    pass
             # Start new cycle - clears display and starts fresh
             update_patient_log(f"=== Cycle {cycle} ===", new_cycle=cycle)
 
@@ -3238,6 +3246,32 @@ def run_monitor_only(mode="inbound"):
     # --- Phase 3: Claim slot + signal orchestrator (status 160) ---
     _post_status(160, "Location confirmed")
     demo_overlay.update_status(inbound_text=f"Monitoring {bot_location}")
+
+    # Claim the bot slot in the database so dashboard shows active status
+    from mhtagentic import OUTPUT_DIR
+    from mhtagentic.db import claim_slot, heartbeat_slot, release_slot
+    _db_path = str(OUTPUT_DIR / "mht_data.db")
+    _slot_name = os.environ.get("MHT_RDP_LABEL", "RDP1").replace("RDP", "experity").lower()
+    # Map RDP1->experityb, RDP2->experityc, RDP3->experityd
+    _slot_map = {"rdp1": "experityb", "rdp2": "experityc", "rdp3": "experityd"}
+    _slot_name = _slot_map.get(os.environ.get("MHT_RDP_LABEL", "RDP1").lower(), "experityb")
+    _claimed = claim_slot(_db_path, _slot_name)
+    if _claimed:
+        print(f"[monitor-only] Claimed slot: {_claimed}", flush=True)
+        # Update slot with role and location
+        try:
+            import sqlite3 as _sql
+            _conn = _sql.connect(_db_path, timeout=10)
+            _conn.execute(
+                "UPDATE bot_slot SET role = ?, location = ? WHERE slot_name = ?",
+                (mode, bot_location, _slot_name),
+            )
+            _conn.commit()
+            _conn.close()
+        except Exception as _e:
+            print(f"[monitor-only] Slot update error: {_e}", flush=True)
+    else:
+        print(f"[monitor-only] WARNING: Could not claim slot {_slot_name}", flush=True)
 
     _should_exit = False
 
