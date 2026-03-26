@@ -562,13 +562,27 @@ def _kill_all_rdp_bot_processes() -> int:
     except Exception as e:
         logger.error(f"PsExec taskkill failed: {e}")
 
-    # Also kill mstsc.exe (RDP windows) to close the agent sessions
+    # Close agent RDP windows (mstsc connecting to localhost only)
     try:
-        subprocess.run(
-            ['taskkill', '/F', '/IM', 'mstsc.exe'],
+        r = subprocess.run(
+            ['tasklist', '/V', '/FI', 'IMAGENAME eq mstsc.exe', '/FO', 'CSV'],
             capture_output=True, text=True, timeout=10,
         )
-        logger.info("Killed mstsc.exe (RDP windows)")
+        for line in r.stdout.strip().split('\n')[1:]:
+            parts = line.replace('"', '').split(',')
+            if len(parts) >= 2:
+                # Only kill mstsc windows that connect to localhost (agent sessions)
+                title = parts[-1] if parts else ''
+                if 'localhost' in title.lower():
+                    try:
+                        pid = int(parts[1])
+                        subprocess.run(
+                            ['taskkill', '/F', '/PID', str(pid)],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        logger.info(f"Killed agent mstsc PID {pid}")
+                    except (ValueError, IndexError):
+                        continue
     except Exception:
         pass
 
@@ -783,46 +797,19 @@ _SYSTEM_PROCS = frozenset({
 
 def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
     """
-    Stop everything: kill bot processes, logoff all RDP sessions,
-    close mstsc windows to prevent 'session ended' error dialogs.
-
-    Three steps:
-      1. Kill all python.exe in RDP sessions (wmic, fallback elevated taskkill)
-      2. Logoff all RDP sessions via elevated WTSLogoffSession
-      3. Kill mstsc.exe to dismiss error dialogs
+    Stop bot processes and close agent RDP windows.
+    NEVER logoff sessions or kill the orchestrator RDP.
     """
     import time as _time
 
     # Clean up OTP signals
     clear_all_otp_signals()
 
-    # Step 1: Kill bot processes
+    # Step 1: Kill bot processes (skips dashboard, uses PsExec for agent sessions)
     logger.info("[Stop All] Step 1: Killing bot processes...")
     killed = _kill_all_rdp_bot_processes()
     _time.sleep(1)
-
-    # Step 2: Find and logoff all RDP sessions
-    logger.info("[Stop All] Step 2: Logging off RDP sessions...")
-    rdp_sessions = _find_rdp_session_ids()
-    session_ids = [s["session_id"] for s in rdp_sessions]
     logged_off = 0
-
-    if session_ids:
-        logger.info(f"[Stop All] Found RDP sessions: {session_ids}")
-        ok = _logoff_sessions_elevated(session_ids)
-        if ok:
-            logged_off = len(session_ids)
-    else:
-        logger.info("[Stop All] No RDP sessions found")
-        # Still kill mstsc in case there are orphaned client windows
-        try:
-            subprocess.run(
-                ['powershell.exe', '-Command',
-                 "Get-Process mstsc -ErrorAction SilentlyContinue | Stop-Process -Force"],
-                capture_output=True, text=True, timeout=10,
-            )
-        except Exception:
-            pass
 
     # Step 3: Force-reset bot slots
     slots_reset = 0
