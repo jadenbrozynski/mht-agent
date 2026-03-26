@@ -8,6 +8,7 @@ and infers bot health from SQLite database freshness.
 import ctypes
 import ctypes.wintypes
 import logging
+import os
 import sqlite3
 import subprocess
 from datetime import datetime, timedelta
@@ -525,54 +526,51 @@ def _kill_bot_processes_in_session(session_id: int) -> int:
 
 
 def _kill_all_rdp_bot_processes() -> int:
-    """Kill all python.exe processes running in RDP sessions (not Console)."""
+    """Kill all python.exe processes running in RDP sessions using PsExec as SYSTEM."""
     killed = 0
+
+    # Use PsExec to run taskkill as SYSTEM — can kill processes in other user sessions
     try:
+        psexec = str(_PSEXEC_PATH)
+        if not _PSEXEC_PATH.exists():
+            logger.error(f"PsExec not found at {_PSEXEC_PATH}")
+            return 0
+
+        # Get our own PID so we don't kill the dashboard
+        my_pid = os.getpid()
+        # List python processes, then kill ones that aren't us
         r = subprocess.run(
-            ['tasklist', '/V', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'],
+            ['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'],
             capture_output=True, text=True, timeout=10,
         )
         for line in r.stdout.strip().split('\n')[1:]:
             parts = line.replace('"', '').split(',')
-            if len(parts) >= 3 and 'RDP' in parts[2]:
+            if len(parts) >= 2:
                 try:
                     pid = int(parts[1])
                 except (ValueError, IndexError):
                     continue
+                if pid == my_pid:
+                    continue
                 subprocess.run(
-                    ['taskkill', '/F', '/PID', str(pid)],
+                    [psexec, '-accepteula', '-nobanner', '-s',
+                     'taskkill', '/F', '/PID', str(pid)],
                     capture_output=True, text=True, timeout=10,
                 )
-                logger.info(f"Killed python.exe PID {pid}")
+                logger.info(f"PsExec killed python.exe PID {pid}")
                 killed += 1
     except Exception as e:
-        logger.error(f"Failed to kill RDP bot processes: {e}")
+        logger.error(f"PsExec taskkill failed: {e}")
 
-    # Fallback: elevated taskkill if wmic didn't work
-    if killed == 0:
-        try:
-            r = subprocess.run(
-                ['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'],
-                capture_output=True, text=True, timeout=10,
-            )
-            rdp_pids = []
-            for line in r.stdout.strip().split('\n')[1:]:
-                parts = line.replace('"', '').split(',')
-                if len(parts) >= 3 and 'RDP' in parts[2]:
-                    try:
-                        rdp_pids.append(str(int(parts[1])))
-                    except (ValueError, IndexError):
-                        continue
-            if rdp_pids:
-                args = '/F ' + ' '.join(f'/PID {p}' for p in rdp_pids)
-                subprocess.run(
-                    ['powershell.exe', '-Command',
-                     f"Start-Process -FilePath 'taskkill' -ArgumentList '{args}' -Verb RunAs -Wait"],
-                    capture_output=True, text=True, timeout=15,
-                )
-                killed = len(rdp_pids)
-        except Exception:
-            pass
+    # Also kill mstsc.exe (RDP windows) to close the agent sessions
+    try:
+        subprocess.run(
+            ['taskkill', '/F', '/IM', 'mstsc.exe'],
+            capture_output=True, text=True, timeout=10,
+        )
+        logger.info("Killed mstsc.exe (RDP windows)")
+    except Exception:
+        pass
 
     return killed
 
