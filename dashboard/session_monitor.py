@@ -788,7 +788,7 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
     killed = _kill_all_rdp_bot_processes()
     _time.sleep(1)
 
-    # Step 2: Logoff agent sessions ONLY — use WTS API to get exact usernames
+    # Step 2: Logoff agent sessions via elevated PowerShell script
     logger.info("[Stop All] Step 2: Logging off agent sessions...")
     logged_off = 0
     try:
@@ -802,19 +802,15 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
                 ("State", ctypes.wintypes.DWORD),
             ]
 
-        # Set up WTSLogoffSession signature
-        wtsapi32.WTSLogoffSession.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD, ctypes.wintypes.BOOL]
-        wtsapi32.WTSLogoffSession.restype = ctypes.wintypes.BOOL
-
         pInfo = ctypes.POINTER(WTS_SESSION_INFO)()
         count = ctypes.wintypes.DWORD()
         wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(pInfo), ctypes.byref(count))
 
+        agent_sids = []
         for i in range(count.value):
             sid = pInfo[i].SessionId
             if sid in (0, 1, 65536):
                 continue
-            # Get username for this session
             buf = ctypes.wintypes.LPWSTR()
             size = ctypes.wintypes.DWORD()
             ok = wtsapi32.WTSQuerySessionInformationW(0, sid, 5, ctypes.byref(buf), ctypes.byref(size))
@@ -822,20 +818,25 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
                 username = buf.value.lower()
                 wtsapi32.WTSFreeMemory(buf)
                 if username == "agent":
-                    logger.info(f"[Stop All] Logging off agent (session {sid})")
-                    # Use WTSLogoffSession API directly — no PsExec needed
-                    ok = wtsapi32.WTSLogoffSession(0, sid, True)
-                    if ok:
-                        logger.info(f"[Stop All] WTSLogoffSession({sid}) succeeded")
-                    else:
-                        err = ctypes.get_last_error()
-                        logger.error(f"[Stop All] WTSLogoffSession({sid}) failed, error={err}")
-                        # Fallback: try reset session command
-                        subprocess.run(['reset', 'session', str(sid)], capture_output=True, text=True, timeout=10)
-                    logged_off += 1
+                    agent_sids.append(sid)
+                    logger.info(f"[Stop All] Found agent session {sid}")
                 else:
                     logger.info(f"[Stop All] Skipping {username} (session {sid})")
         wtsapi32.WTSFreeMemory(pInfo)
+
+        if agent_sids:
+            # Write a batch script that runs logoff for each agent session
+            bat_path = Path(r"C:\ProgramData\MHTAgentic\logoff_agents.bat")
+            with open(bat_path, "w") as f:
+                for sid in agent_sids:
+                    f.write(f"logoff {sid}\n")
+            # Run elevated via ShellExecuteW (triggers UAC if needed)
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", str(bat_path), None, None, 0
+            )
+            logger.info(f"[Stop All] Elevated logoff launched (ret={ret}) for sessions {agent_sids}")
+            logged_off = len(agent_sids)
+            _time.sleep(3)  # Wait for logoff to complete
     except Exception as e:
         logger.error(f"[Stop All] Session logoff failed: {e}")
 
