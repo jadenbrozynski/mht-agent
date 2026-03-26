@@ -100,13 +100,34 @@ def _generate_rdp_files(count: int) -> list:
         label = f"RDP{i + 1}"
         rdp_path = RDP_DIR / f"{rdp_key}_MHT.rdp"
 
-        # Build .rdp file content — keep original resolution, smart sizing scales it
+        # Build .rdp file content — force 1280x720 + smart sizing
+        has_width = has_height = has_smart = has_screenmode = False
         lines = []
         for l in base_settings:
             if l.startswith("username:"):
                 lines.append(username_line)
+            elif l.startswith("desktopwidth:"):
+                lines.append("desktopwidth:i:1280")
+                has_width = True
+            elif l.startswith("desktopheight:"):
+                lines.append("desktopheight:i:720")
+                has_height = True
+            elif l.startswith("smart sizing:"):
+                lines.append("smart sizing:i:1")
+                has_smart = True
+            elif l.startswith("screen mode id:"):
+                lines.append("screen mode id:i:1")
+                has_screenmode = True
             else:
                 lines.append(l)
+        if not has_width:
+            lines.append("desktopwidth:i:1280")
+        if not has_height:
+            lines.append("desktopheight:i:720")
+        if not has_smart:
+            lines.append("smart sizing:i:1")
+        if not has_screenmode:
+            lines.append("screen mode id:i:1")
         lines.append(f"winposstr:s:0,1,{x1},{y1},{x2},{y2}")
 
         rdp_path.write_text("\n".join(lines) + "\n")
