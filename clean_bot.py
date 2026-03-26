@@ -425,6 +425,78 @@ def kill_existing_apps():
     pass
 
 
+def _dismiss_logout_popup_aggressive():
+    """Aggressively scan for and dismiss the Experity logout popup using multiple strategies."""
+    import ctypes
+    import ctypes.wintypes
+    log("Checking for logout popup (aggressive, 10s)...")
+
+    for attempt in range(10):
+        try:
+            # Strategy 1: Win32 #32770 dialog class (standard Windows dialog)
+            user32 = ctypes.windll.user32
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            found = []
+            def _enum(hwnd, lp):
+                cls = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(hwnd, cls, 64)
+                if user32.IsWindowVisible(hwnd):
+                    found.append((hwnd, cls.value))
+                return True
+            user32.EnumWindows(WNDENUMPROC(_enum), 0)
+
+            for hwnd, cls in found:
+                title_buf = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, title_buf, 256)
+                t = title_buf.value
+                log(f"  Window: hwnd={hwnd} class='{cls}' title='{t}'")
+                if 'confirm' in t.lower() and 'log' in t.lower():
+                    log(f"  FOUND logout dialog! Sending Tab+Enter...")
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.2)
+                    import pyautogui
+                    pyautogui.press('tab')
+                    time.sleep(0.2)
+                    pyautogui.press('enter')
+                    log(f"  Dismissed via keyboard!")
+                    time.sleep(1)
+                    return True
+
+            # Strategy 2: pywinauto scan all windows
+            from pywinauto import Desktop
+            desktop = Desktop(backend='uia')
+            for w in desktop.windows():
+                try:
+                    title = w.window_text() or ""
+                    if 'confirm' in title.lower() and 'log' in title.lower():
+                        log(f"  FOUND via pywinauto: '{title}'")
+                        for btn in w.descendants(control_type='Button'):
+                            if btn.window_text() == 'No':
+                                btn.click_input()
+                                log(f"  Clicked No!")
+                                time.sleep(1)
+                                return True
+                    # Check inside Tracking Board / Experity windows
+                    if 'Tracking Board' in title or 'Experity' in title:
+                        for btn in w.descendants(control_type='Button'):
+                            if btn.window_text() == 'No':
+                                for t in w.descendants(control_type='Text'):
+                                    txt = (t.window_text() or "").lower()
+                                    if 'log out' in txt or 'confirm' in txt:
+                                        log(f"  FOUND in-app logout! Clicking No...")
+                                        btn.click_input()
+                                        time.sleep(1)
+                                        return True
+                except:
+                    continue
+        except Exception as e:
+            log(f"  Popup check error: {e}")
+        time.sleep(1)
+
+    log("No logout popup found after 10 checks")
+    return False
+
+
 def _dismiss_logout_popup(win):
     """Dismiss the 'Confirm log out' popup by clicking No/Cancel."""
     import time
@@ -855,6 +927,8 @@ def main():
             result = do_login()
 
             if result in (110, -2):
+                # Dismiss any logout popup that appears right after login
+                _dismiss_logout_popup_aggressive()
                 # Login succeeded — continue to monitoring (keep process alive)
                 _run_post_login()
                 return result
