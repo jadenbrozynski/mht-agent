@@ -228,7 +228,7 @@ def build_helper_script(rdp_labels, run_seed, claimed_sids=None, assignments=Non
     for p in sys.path:
         if "site-packages" in p and p not in extra_paths:
             # Skip per-user paths — agent can't access orchestrator's profile
-            if r"\Users\" in p and r"\Users\Public" not in p:
+            if "\\Users\\" in p and "\\Users\\Public" not in p:
                 continue
             extra_paths.append(p)
     # Include system-wide Python's site-packages
