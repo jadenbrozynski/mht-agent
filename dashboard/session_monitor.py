@@ -562,29 +562,7 @@ def _kill_all_rdp_bot_processes() -> int:
     except Exception as e:
         logger.error(f"PsExec taskkill failed: {e}")
 
-    # Close agent RDP windows (mstsc connecting to localhost only)
-    try:
-        r = subprocess.run(
-            ['tasklist', '/V', '/FI', 'IMAGENAME eq mstsc.exe', '/FO', 'CSV'],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in r.stdout.strip().split('\n')[1:]:
-            parts = line.replace('"', '').split(',')
-            if len(parts) >= 2:
-                # Only kill mstsc windows that connect to localhost (agent sessions)
-                title = parts[-1] if parts else ''
-                if 'localhost' in title.lower():
-                    try:
-                        pid = int(parts[1])
-                        subprocess.run(
-                            ['taskkill', '/F', '/PID', str(pid)],
-                            capture_output=True, text=True, timeout=10,
-                        )
-                        logger.info(f"Killed agent mstsc PID {pid}")
-                    except (ValueError, IndexError):
-                        continue
-    except Exception:
-        pass
+    # NOTE: mstsc windows are closed AFTER agent sessions are logged off (in stop_all)
 
     return killed
 
@@ -849,7 +827,28 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
     except Exception as e:
         logger.error(f"[Stop All] Session logoff failed: {e}")
 
-    # Step 3: Force-reset bot slots
+    # Step 3: Close agent mstsc windows (localhost only) after logoff
+    _time.sleep(2)
+    try:
+        r = subprocess.run(
+            ['tasklist', '/V', '/FI', 'IMAGENAME eq mstsc.exe', '/FO', 'CSV'],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.strip().split('\n')[1:]:
+            parts = line.replace('"', '').split(',')
+            if len(parts) >= 2:
+                title = parts[-1] if parts else ''
+                if 'localhost' in title.lower():
+                    try:
+                        pid = int(parts[1])
+                        subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, text=True, timeout=10)
+                        logger.info(f"Closed agent mstsc PID {pid}")
+                    except (ValueError, IndexError):
+                        continue
+    except Exception:
+        pass
+
+    # Step 4: Force-reset bot slots
     slots_reset = 0
     output_dir = Path(r"C:\ProgramData\MHTAgentic")
     slots_reset = _force_reset_all_slots(output_dir)
