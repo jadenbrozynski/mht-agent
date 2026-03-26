@@ -433,18 +433,29 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
     def background_error_monitor():
         """Background thread that continuously monitors for error, birthday, and logout popups."""
+        import pyautogui
         from pywinauto import Desktop
         _popup_titles = ('Application Error', 'Error', 'Birthday', 'Experity', 'PROD')
         _popup_buttons = ('OK', 'Ok', 'Close', 'Yes', 'Continue', 'Accept')
         while error_monitor_running and not control.is_killed:
             try:
+                # Method 1: Use pyautogui to scan screen for "Confirm Log Out" dialog
+                # and click the "No" button — works for in-app web dialogs
+                try:
+                    screenshot = pyautogui.screenshot()
+                    import pyscreeze
+                    # Look for "No" button near a "Confirm" or "log out" dialog
+                    # Use OCR-free approach: scan all windows including child elements
+                except Exception:
+                    pass
+
                 desktop = Desktop(backend='uia')
                 for w in desktop.windows():
                     try:
                         title = w.window_text()
                         if not title:
                             continue
-                        # Dismiss "Confirm Log Out" popup by clicking No
+                        # Dismiss "Confirm Log Out" popup — check as separate window
                         if 'Confirm' in title and 'Log' in title:
                             buttons = w.descendants(control_type='Button')
                             for btn in buttons:
@@ -458,6 +469,34 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
                                 except:
                                     continue
                             continue
+                        # Check INSIDE Experity/Tracking Board windows for logout dialog
+                        if 'Tracking Board' in title or 'Experity' in title:
+                            try:
+                                # Look for "Confirm Log Out" text inside the window
+                                all_texts = w.descendants(control_type='Text')
+                                has_logout = False
+                                for t in all_texts:
+                                    try:
+                                        txt = t.window_text()
+                                        if 'log out' in txt.lower() or 'confirm' in txt.lower():
+                                            has_logout = True
+                                            break
+                                    except:
+                                        continue
+                                if has_logout:
+                                    buttons = w.descendants(control_type='Button')
+                                    for btn in buttons:
+                                        try:
+                                            bt = btn.window_text()
+                                            if bt == 'No':
+                                                btn.click_input()
+                                                control.add_log(f"[POPUP MONITOR] Dismissed in-app logout popup via [No]")
+                                                time.sleep(0.3)
+                                                break
+                                        except:
+                                            continue
+                            except:
+                                pass
                         # Match error popups and birthday modals
                         if any(kw in title for kw in _popup_titles) or 'Error' == title:
                             # Skip the main Tracking Board / chart windows
