@@ -810,33 +810,42 @@ def stop_all_rdp_sessions(rdp_search_dirs: Optional[List[Path]] = None) -> Dict:
     killed = _kill_all_rdp_bot_processes()
     _time.sleep(1)
 
-    # Step 2: Logoff agent sessions only (never orchestrator/administrator)
+    # Step 2: Logoff agent sessions ONLY — use WTS API to get exact usernames
     logger.info("[Stop All] Step 2: Logging off agent sessions...")
     logged_off = 0
-    _skip_users = {"orchestrator", "administrator"}
     try:
-        r = subprocess.run(
-            ['query', 'session'],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in r.stdout.strip().split('\n')[1:]:
-            parts = line.split()
-            if len(parts) >= 4:
-                username = parts[0].strip('>').lower()
-                try:
-                    session_id = int(parts[2])
-                except (ValueError, IndexError):
-                    continue
-                if username in _skip_users:
-                    logger.info(f"[Stop All] Skipping {username} (session {session_id})")
-                    continue
-                if username and session_id > 0:
-                    logger.info(f"[Stop All] Logging off {username} (session {session_id})")
-                    subprocess.run(
-                        ['logoff', str(session_id)],
-                        capture_output=True, text=True, timeout=10,
-                    )
+        import ctypes, ctypes.wintypes
+        wtsapi32 = ctypes.windll.Wtsapi32
+
+        class WTS_SESSION_INFO(ctypes.Structure):
+            _fields_ = [
+                ("SessionId", ctypes.wintypes.DWORD),
+                ("pWinStationName", ctypes.wintypes.LPWSTR),
+                ("State", ctypes.wintypes.DWORD),
+            ]
+
+        pInfo = ctypes.POINTER(WTS_SESSION_INFO)()
+        count = ctypes.wintypes.DWORD()
+        wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(pInfo), ctypes.byref(count))
+
+        for i in range(count.value):
+            sid = pInfo[i].SessionId
+            if sid in (0, 1, 65536):
+                continue
+            # Get username for this session
+            buf = ctypes.wintypes.LPWSTR()
+            size = ctypes.wintypes.DWORD()
+            ok = wtsapi32.WTSQuerySessionInformationW(0, sid, 5, ctypes.byref(buf), ctypes.byref(size))
+            if ok and buf.value:
+                username = buf.value.lower()
+                wtsapi32.WTSFreeMemory(buf)
+                if username == "agent":
+                    logger.info(f"[Stop All] Logging off agent (session {sid})")
+                    subprocess.run(['logoff', str(sid)], capture_output=True, text=True, timeout=10)
                     logged_off += 1
+                else:
+                    logger.info(f"[Stop All] Skipping {username} (session {sid})")
+        wtsapi32.WTSFreeMemory(pInfo)
     except Exception as e:
         logger.error(f"[Stop All] Session logoff failed: {e}")
 
