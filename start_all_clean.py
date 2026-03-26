@@ -30,17 +30,18 @@ from mhtagentic.db.database import (
 # Helpers
 # ---------------------------------------------------------------------------
 def _find_system_python(exe_name="python.exe"):
-    """Find Python exe dynamically — checks common install locations."""
-    import shutil
-    found = shutil.which(exe_name)
-    if found:
-        return Path(found)
+    """Find Python exe dynamically — prefers system-wide install."""
+    # Check Program Files first — accessible by all users
     for base in [r"C:\Program Files", r"C:\Program Files (x86)"]:
         for d in sorted(Path(base).glob("Python*"), reverse=True):
             candidate = d / exe_name
             if candidate.exists():
                 return candidate
-    return Path(exe_name)  # fallback — hope it's on PATH
+    import shutil
+    found = shutil.which(exe_name)
+    if found:
+        return Path(found)
+    return Path(exe_name)
 
 # ---------------------------------------------------------------------------
 # Config
