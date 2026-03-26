@@ -212,18 +212,29 @@ def build_helper_script(rdp_labels, run_seed, claimed_sids=None, assignments=Non
     if not launcher_script.exists():
         launcher_script = PROJECT_ROOT / "launcher.pyw"
 
-    # Find python.exe
-    python_dir = Path(sys.executable).parent
-    python_exe = python_dir / "python.exe"
-    if not python_exe.exists():
-        python_exe = _find_system_python()
+    # Find python.exe — prefer system-wide install so all users can access it
+    system_python = _find_system_python()
+    if "Program Files" in str(system_python):
+        python_exe = system_python
+    else:
+        python_dir = Path(sys.executable).parent
+        python_exe = python_dir / "python.exe"
+        if not python_exe.exists():
+            python_exe = system_python
 
-    # Build PYTHONPATH
+    # Build PYTHONPATH — only include paths accessible by all users
     pd_sp = r"C:\ProgramData\MHTAgentic\site-packages"
     extra_paths = [pd_sp, pd_sp + r"\win32", pd_sp + r"\win32\lib", pd_sp + r"\Pythonwin"]
     for p in sys.path:
         if "site-packages" in p and p not in extra_paths:
+            # Skip per-user paths — agent can't access orchestrator's profile
+            if r"\Users\" in p and r"\Users\Public" not in p:
+                continue
             extra_paths.append(p)
+    # Include system-wide Python's site-packages
+    sys_sp = str(python_exe.parent / "Lib" / "site-packages")
+    if sys_sp not in extra_paths:
+        extra_paths.append(sys_sp)
     pythonpath_str = ";".join(extra_paths)
 
     pywin32_dll_dir = str(shared_root)
