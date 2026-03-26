@@ -20,20 +20,20 @@ logger = logging.getLogger("mht_dashboard.monitor")
 
 
 def _find_system_python(exe_name="pythonw.exe"):
-    """Find Python exe dynamically — checks common install locations."""
+    """Find Python exe dynamically — prefers system-wide install."""
+    # Check Program Files first — accessible by all users
+    for base in [r"C:\Program Files", r"C:\Program Files (x86)"]:
+        for d in sorted(Path(base).glob("Python*"), reverse=True):
+            c = d / exe_name
+            if c.exists():
+                return c
     import shutil, sys
-    # Try next to current interpreter first
     candidate = Path(sys.executable).parent / exe_name
     if candidate.exists():
         return candidate
     found = shutil.which(exe_name)
     if found:
         return Path(found)
-    for base in [r"C:\Program Files", r"C:\Program Files (x86)"]:
-        for d in sorted(Path(base).glob("Python*"), reverse=True):
-            c = d / exe_name
-            if c.exists():
-                return c
     return Path(exe_name)
 
 
@@ -540,7 +540,7 @@ def _kill_all_rdp_bot_processes() -> int:
                 except (ValueError, IndexError):
                     continue
                 subprocess.run(
-                    ['wmic', 'process', 'where', f'ProcessId={pid}', 'call', 'terminate'],
+                    ['taskkill', '/F', '/PID', str(pid)],
                     capture_output=True, text=True, timeout=10,
                 )
                 logger.info(f"Killed python.exe PID {pid}")
@@ -1127,7 +1127,12 @@ def start_monitoring_in_sessions(project_root: Path) -> Dict:
     extra_paths = [r"C:\ProgramData\MHTAgentic\site-packages"]
     for p in __import__("sys").path:
         if "site-packages" in p:
+            if "\\Users\\" in p and "\\Users\\Public" not in p:
+                continue
             extra_paths.append(p)
+    sys_sp = str(pythonw_path).replace("pythonw.exe", "").rstrip("\\") + "\\Lib\\site-packages"
+    if sys_sp not in extra_paths:
+        extra_paths.append(sys_sp)
     pythonpath_str = ";".join(extra_paths)
 
     # pywin32 DLLs path
@@ -1261,7 +1266,12 @@ def launch_bot_in_session(session_id: int, project_root: Path,
     extra_paths = [r"C:\ProgramData\MHTAgentic\site-packages"]
     for p in sys.path:
         if "site-packages" in p:
+            if "\\Users\\" in p and "\\Users\\Public" not in p:
+                continue
             extra_paths.append(p)
+    sys_sp = str(pythonw_path).replace("pythonw.exe", "").rstrip("\\") + "\\Lib\\site-packages"
+    if sys_sp not in extra_paths:
+        extra_paths.append(sys_sp)
     pythonpath_str = ";".join(extra_paths)
 
     log_file = Path(r"C:\ProgramData\MHTAgentic\bot_launch.log")
