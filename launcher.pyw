@@ -435,10 +435,26 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
         """Aggressively detect and dismiss the Experity 'Confirm Log Out' popup.
         Uses multiple strategies since it can be an in-app web dialog."""
         import pyautogui
+        control.add_log("[LOGOUT CHECK] Scanning for logout popup...")
+        # Also log to file so orchestrator can read it
+        try:
+            with open(r"C:\ProgramData\MHTAgentic\logout_popup_debug.log", "a") as _lf:
+                import datetime as _dt
+                _lf.write(f"[{_dt.datetime.now():%H:%M:%S}] Scanning for logout popup...\n")
+                _lf.flush()
+        except:
+            pass
         try:
             # Strategy 1: pywinauto — find any window/dialog with logout text
             from pywinauto import Desktop
             desktop = Desktop(backend='uia')
+            all_titles = []
+            for w in desktop.windows():
+                try:
+                    all_titles.append(w.window_text() or "(no title)")
+                except:
+                    pass
+            control.add_log(f"[LOGOUT CHECK] Windows found: {all_titles[:10]}")
             for w in desktop.windows():
                 try:
                     title = w.window_text() or ""
@@ -492,8 +508,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
             # Check if there's a dialog by looking for a specific window class
             import ctypes
             user32 = ctypes.windll.user32
+            control.add_log("[LOGOUT CHECK] Strategy 3: Win32 dialog scan...")
             # Find dialog windows with class "#32770" (standard Windows dialog)
             hwnd = user32.FindWindowW("#32770", None)
+            control.add_log(f"[LOGOUT CHECK] FindWindowW #32770 result: hwnd={hwnd}")
             if hwnd:
                 title_buf = ctypes.create_unicode_buffer(256)
                 user32.GetWindowTextW(hwnd, title_buf, 256)
@@ -537,8 +555,10 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
     def background_error_monitor():
         """Background thread that continuously monitors for error, birthday, and logout popups."""
         from pywinauto import Desktop
+        control.add_log("[ERROR MONITOR] === NEW CODE v2 — logout popup detection active ===")
         _popup_titles = ('Application Error', 'Error', 'Birthday', 'Experity', 'PROD')
         _popup_buttons = ('OK', 'Ok', 'Close', 'Yes', 'Continue', 'Accept')
+        _logout_scan_count = 0
         while error_monitor_running and not control.is_killed:
             try:
                 # Check for Experity logout popup first
