@@ -78,15 +78,11 @@ def _generate_rdp_files(count: int) -> list:
     password_line = next((l for l in template_lines if l.startswith("password 51:")), "")
     username_line = next((l for l in template_lines if l.startswith("username:")), "username:s:ExperityB")
 
-    # Grid layout: 3 columns, use 16:9 aspect ratio windows
-    cols = min(count, 3)
-    cell_w = screen_w // cols
-    cell_h = int(cell_w * 9 / 16)  # 16:9 aspect ratio
-    # If windows don't fit vertically, scale down
+    # Grid layout: 2 columns, 16:9 aspect ratio windows
+    cols = min(count, 2)
     rows = (count + cols - 1) // cols
-    if cell_h * rows > screen_h:
-        cell_h = screen_h // rows
-        cell_w = int(cell_h * 16 / 9)
+    cell_w = screen_w // cols
+    cell_h = screen_h // rows
 
     rdp_labels = []  # (label, rdp_key, rdp_path)
     slot_letters = "BCDEFGHIJKLMNOP"
