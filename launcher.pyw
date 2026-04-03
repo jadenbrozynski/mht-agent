@@ -753,8 +753,9 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
         # Build MHT API JSON structure (Modify Appointment format)
         bot_location = os.environ.get("BOT_LOCATION", "ATTALLA")
+        integration_clinic_id = int(os.environ.get("INTEGRATION_CLINIC_ID", "113"))
         mht_api_payload = {
-            "clinic_id": 110,  # Southern Immediate Care clinic ID (placeholder, get from MHT)
+            "clinic_id": integration_clinic_id,
             "clinic_location": bot_location,
             "patient": {
                 "patient_id": patient_id,
@@ -807,6 +808,26 @@ def _start_monitoring(control, outbound_worker=None, demo_mode=False):
 
             # Update DB with converted data (status=CONVERTED)
             db.update_event_converted(event_id, mht_api_payload)
+
+            # Push to remote MHT integration server
+            try:
+                from mhtagentic.db.integration_client import IntegrationClient
+                _int_host = os.environ.get("INTEGRATION_HOST", "")
+                if _int_host:
+                    _int_client = IntegrationClient(
+                        host=_int_host,
+                        port=int(os.environ.get("INTEGRATION_PORT", "3306")),
+                        user=os.environ.get("INTEGRATION_USER", ""),
+                        password=os.environ.get("INTEGRATION_PASSWORD", ""),
+                        database=os.environ.get("INTEGRATION_DATABASE", ""),
+                        clinic_id=integration_clinic_id,
+                    )
+                    if _int_client.push_event(mht_api_payload):
+                        control.add_log(f"Pushed to integration server")
+                    else:
+                        control.add_log(f"Integration push failed (logged)")
+            except Exception as e:
+                control.add_log(f"Integration push error: {str(e)[:40]}")
 
             # Track this patient's JSON file and event_id for expiration when discharged
             patient_name_full = patient_data.get('name', f"{last_name}, {first_name}")

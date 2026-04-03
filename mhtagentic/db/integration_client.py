@@ -20,7 +20,7 @@ class IntegrationClient:
     """MySQL client for dual-writing events to the MHT integration server."""
 
     def __init__(self, host, port, user, password, database,
-                 clinic_id=163, npi=""):
+                 clinic_id=113, npi=""):
         self.config = {
             "host": host,
             "port": port,
