@@ -41,6 +41,12 @@ if _env_path.exists():
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
+# Isolate comtypes cache per RDP session to avoid PermissionError collisions
+_session_id = os.environ.get("SESSIONNAME", os.environ.get("USERNAME", "default"))
+_comtypes_cache = Path(r"C:\ProgramData\MHTAgentic\comtypes_cache") / _session_id
+_comtypes_cache.mkdir(parents=True, exist_ok=True)
+os.environ["COMTYPES_CACHE"] = str(_comtypes_cache)
+
 # Ensure pywin32 DLLs are findable (Python 3.8+ restricts DLL search)
 _pywin32_dll_dirs = [
     os.path.join(os.environ.get("PYTHONPATH", "").split(";")[0], "pywin32_system32"),
